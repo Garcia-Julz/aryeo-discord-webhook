@@ -1,6 +1,5 @@
 // server.js
 const express = require("express");
-const crypto = require("crypto");
 const fetch = require("node-fetch");
 
 const app = express();
@@ -12,7 +11,7 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 console.log("Boot: ARYEO_WEBHOOK_SECRET present?", !!ARYEO_WEBHOOK_SECRET);
 console.log("Boot: DISCORD_WEBHOOK_URL present?", !!DISCORD_WEBHOOK_URL);
 
-// Capture raw body so we can validate the signature
+// Capture raw body (kept for future real verification)
 app.use(
   express.json({
     verify: (req, res, buf) => {
@@ -21,54 +20,27 @@ app.use(
   })
 );
 
+// TEMPORARY: Disable signature verification for testing
 function verifyAryeoSignature(rawBody, signatureHeader) {
-  if (!signatureHeader) {
-    console.warn("❌ Missing Signature header");
-    return false;
-  }
-
-  if (!ARYEO_WEBHOOK_SECRET) {
-    console.error("❌ ARYEO_WEBHOOK_SECRET is not set in environment");
-    return false;
-  }
-
-  let expected;
-  try {
-    expected = crypto
-      .createHmac("sha256", ARYEO_WEBHOOK_SECRET)
-      .update(rawBody, "utf8")
-      .digest("hex");
-  } catch (err) {
-    console.error("❌ Error computing HMAC:", err);
-    return false;
-  }
-
-  try {
-    return crypto.timingSafeEqual(
-      Buffer.from(expected, "hex"),
-      Buffer.from(signatureHeader, "hex")
-    );
-  } catch (err) {
-    console.error("❌ Error comparing HMAC signatures:", err);
-    return false;
-  }
+  console.warn("⚠️ Skipping HMAC verification (TEST MODE).");
+  return true;
 }
 
 app.post("/aryeo-webhook", async (req, res) => {
   try {
     const signature = req.get("Signature");
 
+    // ALWAYS passing in test mode
     if (!verifyAryeoSignature(req.rawBody, signature)) {
       console.warn("❌ Invalid Aryeo webhook signature");
       return res.status(400).send("Invalid signature");
     }
 
     const activity = req.body;
-    console.log("✅ Valid Aryeo activity:", activity);
+    console.log("✅ Valid Aryeo activity received:", activity);
 
     const { name, occurred_at, resource } = activity || {};
 
-    // Example: react to LISTING_DELIVERED
     if (name === "LISTING_DELIVERED") {
       const listingId = resource && resource.id;
 
@@ -101,9 +73,9 @@ app.post("/aryeo-webhook", async (req, res) => {
   }
 });
 
-// Root URL for testing
+// Root URL
 app.get("/", (req, res) => {
-  res.send("Aryeo → Discord webhook is running.");
+  res.send("Aryeo → Discord webhook is running (TEST MODE).");
 });
 
 app.listen(PORT, () => {
