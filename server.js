@@ -469,13 +469,14 @@ async function handleOrderPaymentReceived(activity) {
     if (Array.isArray(order.payments) && order.payments.length > 0) {
       const lastPayment = order.payments[order.payments.length - 1];
 
+      // 🔍 TEMP: log exactly what Aryeo is sending for payments
       console.log(
         "💰 Payments debug for order",
         orderId,
         JSON.stringify(order.payments, null, 2)
       );
 
-      // First: look for already-formatted strings
+      // 1st: look for nicely formatted strings
       const niceString =
         lastPayment.total_price_formatted ||
         lastPayment.amount_formatted ||
@@ -486,7 +487,7 @@ async function handleOrderPaymentReceived(activity) {
       if (niceString) {
         amountLabel = niceString;
       } else {
-        // Second: fall back to numeric amounts
+        // 2nd: look for numeric amounts and format them
         const numericCandidates = [
           lastPayment.total_price,
           lastPayment.amount,
