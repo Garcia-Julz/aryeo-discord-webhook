@@ -257,20 +257,17 @@ async function fetchOrderPaymentInfo(orderId) {
   }
 }
 
-// Fetch today's appointments (used by the morning briefing)
-async function fetchTodaysAppointments() {
+// Fetch appointments for a specific YYYY-MM-DD (Eastern) date
+async function fetchAppointmentsForDate(dateIso) {
   if (!ARYEO_API_KEY) {
-    console.log("❌ ARYEO_API_KEY missing, cannot fetch today's appointments.");
-    return [];
+    console.log("❌ ARYEO_API_KEY missing, cannot fetch appointments.");
+    return null;
   }
-
-  // Simple v1: use today's date in UTC as YYYY-MM-DD
-  const today = new Date().toISOString().slice(0, 10); // "2025-01-31"
 
   const url =
     `https://api.aryeo.com/v1/appointments` +
-    `?start_at=${today}&end_at=${today}` +
-    `&include=order,order.items,order.customer,users`;
+    `?filter[date]=${dateIso}` +
+    `&include=order,order.address,order.customer,order.items,order.listing,users`;
 
   try {
     console.log("🔍 Fetching today's appointments from Aryeo:", url);
@@ -283,49 +280,163 @@ async function fetchTodaysAppointments() {
 
     if (!resp.ok) {
       const text = await resp.text();
-      console.error("❌ Aryeo today's appointments fetch failed:", resp.status, text);
-      return [];
+      console.error("❌ Failed to fetch appointments:", resp.status, text);
+      return null;
     }
 
     const json = await resp.json();
-    const appointments = json.data || json.appointments || [];
+    // Aryeo typically wraps in `data`
+    const appointments = json.data || [];
     console.log(
-      "✅ Fetched today's appointments count:",
-      Array.isArray(appointments) ? appointments.length : 0
+      `✅ Morning briefing raw appointments count for ${dateIso}:`,
+      appointments.length
     );
     return appointments;
   } catch (err) {
-    console.error("💥 Error fetching today's appointments from Aryeo:", err);
-    return [];
+    console.error("💥 Error fetching appointments from Aryeo:", err);
+    return null;
   }
 }
 
-// Build & send the morning briefing to the bookings Discord channel
-async function sendMorningBriefing() {
-  const appointments = await fetchTodaysAppointments();
-  const count = Array.isArray(appointments) ? appointments.length : 0;
-
-  // Get a nice "Jan 31, 2025" style date in Eastern
-  const nowIso = new Date().toISOString();
-  const todayET = formatToEastern(nowIso).date;
+// Build the Discord message for today's appointments
+function buildMorningBriefingMessage(dateIso, appointments) {
+  const { date: prettyDate } = formatToEastern(`${dateIso}T00:00:00Z`);
 
   let lines = [];
-  lines.push(`**Daily Schedule – ${todayET}**`);
+  lines.push(`📅 Daily Schedule – ${prettyDate}`);
   lines.push("");
-  lines.push(`**Total Appointments Today:** ${count}`);
 
-  if (count === 0) {
-    lines.push("");
-    lines.push("No appointments scheduled today.");
+  if (!appointments || appointments.length === 0) {
+    lines.push("• No appointments scheduled today.");
+    return lines.join("\n");
   }
 
-  const content = lines.join("\n");
+  lines.push(`• Total Appointments Today: ${appointments.length}`);
+  lines.push("");
+
+  // Detail each appointment
+  appointments.forEach((appt, idx) => {
+    const order = appt.order || {};
+    const customer = order.customer || {};
+    const items = order.items || [];
+    const users = appt.users || [];
+
+    // Client
+    const clientName = customer.name || "Unknown client";
+
+    // Time
+    const startRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+    const when = startRaw ? formatToEastern(startRaw) : { date: "unknown", time: "unknown" };
+
+    // Address (from order.listing.address or order.address)
+    let propertyAddress = "Unknown address";
+    if (order.listing && order.listing.address && order.listing.address.full_address) {
+      propertyAddress = order.listing.address.full_address;
+    } else if (order.address && order.address.full_address) {
+      propertyAddress = order.address.full_address;
+    }
+
+    const mapsUrl = propertyAddress !== "Unknown address"
+      ? buildGoogleMapsUrl(propertyAddress)
+      : null;
+
+    // Photographer(s)
+    let shooterNames = [];
+    if (Array.isArray(users) && users.length > 0) {
+      shooterNames = users.map((u) =>
+        u.name ||
+        [u.first_name, u.last_name].filter(Boolean).join(" ")
+      ).filter(Boolean);
+    }
+
+    const shootersLabel =
+      shooterNames.length === 0
+        ? "Unassigned"
+        : shooterNames.join(", ");
+
+    // Service summary
+    let serviceSummary = "Unknown service";
+    if (Array.isArray(items) && items.length > 0) {
+      const names = items
+        .map((item) => item.name || item.product_name || item.title)
+        .filter(Boolean);
+
+      if (names.length === 1) {
+        serviceSummary = names[0];
+      } else if (names.length > 1) {
+        const firstFew = names.slice(0, 3).join(", ");
+        serviceSummary =
+          names.length > 3
+            ? `${firstFew} (+${names.length - 3} more)`
+            : firstFew;
+      }
+    }
+
+    // Order link
+    const orderId = order.id;
+    let orderLabel = order.number ? `Order #${order.number}` : (order.title || orderId || "Order");
+    const orderStatusUrl =
+      order.status_url ||
+      order.invoice_url ||
+      order.payment_url ||
+      (orderId
+        ? `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`
+        : null);
+
+    lines.push(`**Appointment ${idx + 1}**`);
+    lines.push(`• Client: \`${clientName}\``);
+    lines.push(`• Time: \`${when.time}\``);
+    lines.push(`• Service: \`${serviceSummary}\``);
+    lines.push(`• Photographer: \`${shootersLabel}\``);
+    lines.push(`• Address: \`${propertyAddress}\``);
+    if (mapsUrl) {
+      lines.push(`• Map: ${mapsUrl}`);
+    }
+    if (orderStatusUrl) {
+      lines.push(`• Order: [${orderLabel}](${orderStatusUrl})`);
+    }
+    lines.push(""); // blank line between appointments
+  });
+
+  return lines.join("\n");
+}
+
+// Main function to send the morning briefing
+async function sendMorningBriefing(dateOverrideIso) {
+  // Compute today's date in Eastern if not provided
+  let todayEst;
+  if (dateOverrideIso) {
+    todayEst = dateOverrideIso;
+  } else {
+    const now = new Date();
+    const estDateStr = now.toLocaleDateString("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    todayEst = estDateStr; // YYYY-MM-DD
+  }
+
+  console.log("📅 Sending morning briefing for date:", todayEst);
+
+  const appointments = await fetchAppointmentsForDate(todayEst);
+  if (!appointments) {
+    console.log("⚠️ No appointments data returned, skipping Discord send.");
+    return { date: todayEst, count: 0 };
+  }
+
+  const content = buildMorningBriefingMessage(todayEst, appointments);
+
+  console.log("➡️ Morning briefing Discord payload:", content);
 
   await sendToDiscord(
     BOOKINGS_WEBHOOK_URL,
     { content },
     "BOOKINGS-MORNING_BRIEFING"
   );
+
+  return { date: todayEst, count: appointments.length };
 }
 
 // ---------------------------------------------------------
