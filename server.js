@@ -320,7 +320,58 @@ async function fetchAppointmentsForDate(dateIso) {
       `✅ Appointments for ${dateIso}: raw=${appointments.length}, filtered=${filtered.length}`
     );
 
-    return filtered;
+    // 🔍 Enrich each appointment with a FULL order object (like the drone handler)
+    const enriched = await Promise.all(
+      filtered.map(async (appt) => {
+        // If we already somehow have a hydrated order, keep it
+        if (appt.order && appt.order.listing && appt.order.listing.address) {
+          return appt;
+        }
+
+        const orderId =
+          appt.order_id ||
+          (appt.order && appt.order.id) ||
+          null;
+
+        if (!orderId) {
+          return appt;
+        }
+
+        const fullOrder = await fetchOrder(orderId);
+        if (!fullOrder) {
+          return appt;
+        }
+
+        return {
+          ...appt,
+          order: fullOrder, // <-- now buildMorningBriefingMessage sees the same shape as drone code
+        };
+      })
+    );
+
+    // Optional: log one appointment to confirm addresses
+    if (enriched.length > 0) {
+      const sample = enriched[0];
+      console.log(
+        "🧪 Sample enriched appointment address debug:",
+        {
+          orderId: sample.order && sample.order.id,
+          listingAddress:
+            sample.order &&
+            sample.order.listing &&
+            sample.order.listing.address &&
+            sample.order.listing.address.full_address,
+          orderAddress:
+            sample.order &&
+            sample.order.address &&
+            sample.order.address.full_address,
+          apptAddress:
+            sample.address && sample.address.full_address,
+        }
+      );
+    }
+
+    return enriched;
   } catch (err) {
     console.error("💥 Error fetching appointments from Aryeo:", err);
     return null;
