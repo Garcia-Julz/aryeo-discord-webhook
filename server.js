@@ -146,6 +146,28 @@ function buildGoogleMapsUrl(addressString) {
   return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
+function findFullAddressDeep(obj, depth = 0) {
+  if (!obj || typeof obj !== "object" || depth > 6) {
+    return null;
+  }
+
+  // If this object itself has a non-empty full_address, use it.
+  if (typeof obj.full_address === "string" && obj.full_address.trim() !== "") {
+    return obj.full_address.trim();
+  }
+
+  // Recurse into child objects/arrays
+  for (const key of Object.keys(obj)) {
+    const val = obj[key];
+    if (val && typeof val === "object") {
+      const found = findFullAddressDeep(val, depth + 1);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
 // Very simple drone-detection helper.
 // Adjust keywords if your product names change.
 function orderRequiresDrone(order) {
@@ -413,13 +435,34 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     // Address (from order.listing.address or order.address, or appt.address)
     let propertyAddress = "Unknown address";
 
-    if (order.listing && order.listing.address && order.listing.address.full_address) {
+    if (
+      order.listing &&
+      order.listing.address &&
+      order.listing.address.full_address
+    ) {
       propertyAddress = order.listing.address.full_address;
     } else if (order.address && order.address.full_address) {
       propertyAddress = order.address.full_address;
     } else if (appt.address && appt.address.full_address) {
       // fallback to appointment address if present
       propertyAddress = appt.address.full_address;
+    } else {
+      // 🔍 Last-resort: search deeply anywhere in the order or appointment
+      const deepAddress =
+        findFullAddressDeep(order) || findFullAddressDeep(appt);
+
+      if (deepAddress) {
+        propertyAddress = deepAddress;
+        console.log("🧭 Morning briefing: found deep full_address:", deepAddress);
+      } else {
+        console.log(
+          "⚠️ Morning briefing: no full_address found on order or appointment:",
+          {
+            apptId: appt.id,
+            orderId: order.id,
+          }
+        );
+      }
     }
 
     const mapsUrl = propertyAddress !== "Unknown address"
