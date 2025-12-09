@@ -516,7 +516,20 @@ function extractAddressFromAppointment(appt) {
   if (!appt) return null;
   const order = appt.order || {};
 
+  // 🔀 Merge listing.address + listing into one object
+  const mergedListing = order.listing
+    ? { ...(order.listing.address || {}), ...order.listing }
+    : null;
+
+  // 🔀 Merge order.address + order into one object
+  const mergedOrder = Object.keys(order).length
+    ? { ...(order.address || {}), ...order }
+    : null;
+
   const candidates = [
+    // Most informative first
+    mergedListing,
+    mergedOrder,
     order.listing && order.listing.address,
     order.address,
     order.listing,
@@ -632,9 +645,9 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     lines.push(`• Service: \`${serviceSummary}\``);
     lines.push(`• Photographer: \`${shootersLabel}\``);
     lines.push(`• Address: \`${propertyAddress}\``);
-    if (mapsUrl) {
-      lines.push(`• Map: ${mapsUrl}`);
-    }
+    // if (mapsUrl) {
+    //   lines.push(`• Map: ${mapsUrl}`);
+    // }
     if (orderStatusUrl) {
       lines.push(`• Order: [${orderLabel}](${orderStatusUrl})`);
     }
