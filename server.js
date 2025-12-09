@@ -172,7 +172,7 @@ async function fetchOrder(orderId) {
 
   const url =
     `https://api.aryeo.com/v1/orders/${orderId}` +
-    `?include=items,listing,customer,appointments,appointments.users,payments,payments.payment_intent`;
+    `?include=items,listing,customer,appointments,appointments.users,payments`;
 
   try {
     console.log("🔍 Fetching order from Aryeo:", url);
@@ -408,7 +408,7 @@ async function handleOrderPaymentReceived(activity) {
   let orderStatusUrl = null;
   let customerName = "unknown";
 
-  // We'll fill this below from either order.payments or the webhook resource
+  // We'll fill this from order.payments and/or the webhook resource
   let amountLabel = "unknown";
 
   // 1) Fetch the full order so we can grab number, customer, payments, etc.
@@ -428,29 +428,27 @@ async function handleOrderPaymentReceived(activity) {
     if (Array.isArray(order.payments) && order.payments.length > 0) {
       const lastPayment = order.payments[order.payments.length - 1];
 
-      // Best guess: Stripe-style cents on payment_intent
-      if (
-        lastPayment.payment_intent &&
-        typeof lastPayment.payment_intent.amount === "number"
-      ) {
-        amountLabel = `$${(lastPayment.payment_intent.amount / 100).toFixed(2)}`;
-      } else if (typeof lastPayment.amount === "number") {
-        // Fallback if amount is a plain number (cents or dollars)
-        // If this ends up being off, we can tweak the /100 logic after
-        amountLabel = `$${(lastPayment.amount / 100).toFixed(2)}`;
-      } else if (lastPayment.total_price_formatted) {
-        // Nicely formatted string, if Aryeo provides it
-        amountLabel = lastPayment.total_price_formatted;
+      // Per Aryeo docs: total_amount / collected_amount / applicable_amount are ints in cents
+      // https://docs.aryeo.com/api/aryeo/orders/get-orders-id.md
+      if (typeof lastPayment.total_amount === "number") {
+        amountLabel = `$${(lastPayment.total_amount / 100).toFixed(2)}`;
+      } else if (typeof lastPayment.collected_amount === "number") {
+        amountLabel = `$${(lastPayment.collected_amount / 100).toFixed(2)}`;
+      } else if (typeof lastPayment.applicable_amount === "number") {
+        amountLabel = `$${(lastPayment.applicable_amount / 100).toFixed(2)}`;
       }
     }
   }
 
   // 2) If we *still* don't know the amount, try to read it directly off the webhook payload
   if (amountLabel === "unknown" && resource) {
-    if (resource.total_price_formatted) {
-      amountLabel = resource.total_price_formatted;
-    } else if (typeof resource.total_price === "number") {
-      amountLabel = `$${(resource.total_price / 100).toFixed(2)}`;
+    // In case Aryeo ever sends a summarized amount on the activity.resource
+    if (typeof resource.total_amount === "number") {
+      amountLabel = `$${(resource.total_amount / 100).toFixed(2)}`;
+    } else if (typeof resource.collected_amount === "number") {
+      amountLabel = `$${(resource.collected_amount / 100).toFixed(2)}`;
+    } else if (typeof resource.applicable_amount === "number") {
+      amountLabel = `$${(resource.applicable_amount / 100).toFixed(2)}`;
     } else if (typeof resource.amount === "number") {
       amountLabel = `$${(resource.amount / 100).toFixed(2)}`;
     } else if (typeof resource.amount === "string") {
@@ -464,7 +462,7 @@ async function handleOrderPaymentReceived(activity) {
     orderTitle ||
     orderId;
 
-  // 4) Build a link to the order if Aryeo didn't give us a status/invoice/payment URL
+  // 4) Build a link to the order if Aryeo didn't give us one
   if (!orderStatusUrl) {
     orderStatusUrl = `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
   }
