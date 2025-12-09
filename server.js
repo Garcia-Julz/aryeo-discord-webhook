@@ -1194,6 +1194,17 @@ cron.schedule(
 // SIMPLE TEST ROUTES (no Aryeo involved)
 // ---------------------------------------------------------
 
+app.get("/test-morning-briefing", async (req, res) => {
+  try {
+    console.log("🧪 Manually triggering morning briefing via /test-morning-briefing");
+    await sendMorningBriefing();
+    res.send("Morning briefing sent to Bookings Discord (if webhook is configured).");
+  } catch (err) {
+    console.error("💥 Error in /test-morning-briefing:", err);
+    res.status(500).send("Error sending morning briefing.");
+  }
+});
+
 app.get("/test-drone", async (req, res) => {
   await sendToDiscord(
     DRONE_WEBHOOK_URL,
