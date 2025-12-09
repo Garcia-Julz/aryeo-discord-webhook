@@ -167,7 +167,7 @@ async function fetchOrder(orderId) {
 
 // ORDER_CREATED → drone channel, with order & appointment info
 async function handleOrderCreated(activity) {
-  const { occurred_at, resource } = activity || {};
+  const { resource } = activity || {};
   const orderId = resource?.id;
 
   if (!orderId) {
@@ -175,10 +175,9 @@ async function handleOrderCreated(activity) {
     return;
   }
 
-  let orderTitle = orderId;
-  let orderStatus = "unknown";
   let orderNumber = null;
   let orderStatusUrl = null;
+  let orderTitle = orderId;
 
   let appointmentDate = "unknown";
   let appointmentTime = "unknown";
@@ -189,12 +188,12 @@ async function handleOrderCreated(activity) {
 
   let customerName = "unknown";
   let requiresDrone = null; // null = unknown, true/false = known
+  let serviceSummary = "unknown";
 
   const order = await fetchOrder(orderId);
 
   if (order) {
     orderTitle = order.title || order.identifier || orderId;
-    orderStatus = order.status || "unknown";
     orderNumber = order.number || null;
     orderStatusUrl = order.status_url || order.payment_url || null;
 
@@ -228,9 +227,27 @@ async function handleOrderCreated(activity) {
       appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
 
       if (appointmentRaw && typeof appointmentRaw === "string") {
-        const [datePart, timePart] = appointmentRaw.split("T");
-        appointmentDate = datePart || appointmentRaw;
-        appointmentTime = (timePart || "").replace("Z", "") || appointmentRaw;
+        const formatted = formatToEastern(appointmentRaw);
+        appointmentDate = formatted.date;
+        appointmentTime = formatted.time;
+      }
+    }
+
+    // Service: summarize order items
+    const items = order.items || order.order_items || [];
+    if (Array.isArray(items) && items.length > 0) {
+      const names = items
+        .map((item) => item.name || item.product_name || item.title)
+        .filter(Boolean);
+
+      if (names.length === 1) {
+        serviceSummary = names[0];
+      } else if (names.length > 1) {
+        const firstFew = names.slice(0, 3).join(", ");
+        serviceSummary =
+          names.length > 3
+            ? `${firstFew} (+${names.length - 3} more)`
+            : firstFew;
       }
     }
 
@@ -238,47 +255,41 @@ async function handleOrderCreated(activity) {
     requiresDrone = orderRequiresDrone(order);
   }
 
-  let droneFlagLabel = "unknown";
-  if (requiresDrone === true) droneFlagLabel = "yes";
-  if (requiresDrone === false) droneFlagLabel = "no";
-
-  // Build a rich Discord message (plain content + nice formatting)
-  let lines = [];
-
-  if (requiresDrone === true) {
-    lines.push("🚁 **New Drone Flight Check Needed**");
-  } else {
-    lines.push("🆕 **New Order Created**");
+  // If we’re confident it’s NOT a drone job, skip notifying this channel
+  if (requiresDrone === false) {
+    console.log("ℹ️ Order does not appear to include drone services; skipping drone notification.");
+    return;
   }
 
-  lines.push("");
-  lines.push("**Order**");
-  lines.push(`• ID: \`${orderId}\``);
-
-  // Order label with hyperlink if we have status_url
-  const label =
+  // Build label "Order #1234" or fallback to title/ID
+  const orderLabel =
     (orderNumber && `Order #${orderNumber}`) ||
     orderTitle ||
     orderId;
 
+  // Build a cleaner Drone notification message
+  let lines = [];
+
+  lines.push("🚁 **New Drone Order – Airspace Check Needed**");
+  lines.push("");
+
+  lines.push("**Order**");
   if (orderStatusUrl) {
-    lines.push(`• Link: [${label}](${orderStatusUrl})`);
+    lines.push(`• Order #: [${orderLabel}](${orderStatusUrl})`);
   } else {
-    lines.push(`• Title: \`${label}\``);
+    lines.push(`• Order #: \`${orderLabel}\``);
   }
 
   if (customerName !== "unknown") {
     lines.push(`• Client: \`${customerName}\``);
   }
 
-  lines.push(`• Status: \`${orderStatus}\``);
-  lines.push(`• Created (UTC): ${occurred_at}`);
-  lines.push(`• Drone Required (auto): \`${droneFlagLabel}\``);
+  lines.push(`• Service: \`${serviceSummary}\``);
 
   lines.push("");
   lines.push("**Appointment**");
   lines.push(`• Date: \`${appointmentDate}\``);
-  lines.push(`• Time (UTC): \`${appointmentTime}\``);
+  lines.push(`• Time: \`${appointmentTime}\``);
   lines.push(`• Location: \`${propertyAddress}\``);
 
   if (mapsUrl) {
@@ -287,10 +298,10 @@ async function handleOrderCreated(activity) {
 
   lines.push("");
   lines.push("**Action for Drone Team**");
-  lines.push("• Check this location in Air Control.");
+  lines.push("• Use the Air Control app to verify airspace for this location.");
   lines.push("• Confirm: Allowed / Restricted / Permit Required.");
 
-  if (requiresDrone === true && DRONE_MENTION) {
+  if (DRONE_MENTION) {
     lines.push("");
     lines.push(DRONE_MENTION);
   }
