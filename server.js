@@ -783,9 +783,6 @@ async function handleAppointmentRescheduled(activity) {
   let lines = [];
   lines.push("🔁 **Appointment Rescheduled**");
   lines.push("");
-  if (appointmentId) {
-    lines.push(`• Appointment ID: \`${appointmentId}\``);
-  }
   if (orderLabel !== "unknown") {
     lines.push(`• Order: \`${orderLabel}\``);
   }
@@ -804,7 +801,7 @@ async function handleAppointmentRescheduled(activity) {
   }
   lines.push("");
   lines.push(
-    `• Change recorded at: \`${changeWhen.date} – ${changeWhen.time}\``
+    `• Updated at: \`${changeWhen.date} – ${changeWhen.time}\``
   );
 
   const content = lines.join("\n");
@@ -859,12 +856,6 @@ async function handlePhotographerAssignmentChanged(activity) {
   let lines = [];
   lines.push("👥 **Photographer Assignment Updated**");
   lines.push("");
-  if (appointmentId) {
-    lines.push(`• Appointment ID: \`${appointmentId}\``);
-  }
-  if (orderId) {
-    lines.push(`• Order ID: \`${orderId}\``);
-  }
   if (shooterNames.length > 0) {
     const label =
       shooterNames.length === 1
@@ -874,7 +865,7 @@ async function handlePhotographerAssignmentChanged(activity) {
   } else {
     lines.push("• Photographer(s) changed (names not parsed).");
   }
-  lines.push(`• Change recorded at: \`${changeWhen.date} – ${changeWhen.time}\``);
+  lines.push(`• Updated at: \`${changeWhen.date} – ${changeWhen.time}\``);
 
   if (shooterMentions.length > 0) {
     lines.push("");
