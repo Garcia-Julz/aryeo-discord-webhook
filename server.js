@@ -146,28 +146,6 @@ function buildGoogleMapsUrl(addressString) {
   return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
-function findFullAddressDeep(obj, depth = 0) {
-  if (!obj || typeof obj !== "object" || depth > 6) {
-    return null;
-  }
-
-  // If this object itself has a non-empty full_address, use it.
-  if (typeof obj.full_address === "string" && obj.full_address.trim() !== "") {
-    return obj.full_address.trim();
-  }
-
-  // Recurse into child objects/arrays
-  for (const key of Object.keys(obj)) {
-    const val = obj[key];
-    if (val && typeof val === "object") {
-      const found = findFullAddressDeep(val, depth + 1);
-      if (found) return found;
-    }
-  }
-
-  return null;
-}
-
 // Very simple drone-detection helper.
 // Adjust keywords if your product names change.
 function orderRequiresDrone(order) {
@@ -402,6 +380,85 @@ async function fetchAppointmentsForDate(dateIso) {
   }
 }
 
+// Try to build a human-readable address from a generic object
+function extractAddressFromObject(obj) {
+  if (!obj || typeof obj !== "object") return null;
+
+  // Most likely candidates for the "street" portion
+  const primaryFields = [
+    "full_address",
+    "formatted_address",
+    "address",
+    "address_line1",
+    "address1",
+    "line1",
+    "street1",
+    "street",
+  ];
+
+  let base = null;
+  for (const key of primaryFields) {
+    if (typeof obj[key] === "string" && obj[key].trim()) {
+      base = obj[key].trim();
+      break;
+    }
+  }
+
+  if (!base) return null;
+
+  // City / state / postal add-ons (common naming patterns)
+  const city =
+    obj.city ||
+    obj.locality ||
+    obj.town ||
+    null;
+
+  const state =
+    obj.state ||
+    obj.region ||
+    obj.province ||
+    obj.state_province ||
+    null;
+
+  const postal =
+    obj.postal_code ||
+    obj.zip ||
+    obj.zip_code ||
+    obj.postcode ||
+    null;
+
+  const parts = [base];
+  if (city) parts.push(city);
+  if (state) parts.push(state);
+  if (postal) parts.push(postal);
+
+  return parts.join(", ");
+}
+
+// Look through all likely places on the appointment + order
+function extractAddressFromAppointment(appt) {
+  if (!appt) return null;
+  const order = appt.order || {};
+
+  const candidates = [
+    order.listing && order.listing.address,
+    order.address,
+    order.listing,
+    order,
+    appt.address,
+    appt.location,
+    appt.property,
+    appt,
+  ];
+
+  for (const obj of candidates) {
+    const addr = extractAddressFromObject(obj);
+    if (addr) return addr;
+  }
+
+  return null;
+}
+
 // Build the Discord message for today's appointments
 function buildMorningBriefingMessage(dateIso, appointments) {
   const { date: prettyDate } = formatToEastern(`${dateIso}T00:00:00Z`);
@@ -433,41 +490,13 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     const when = startRaw ? formatToEastern(startRaw) : { date: "unknown", time: "unknown" };
 
     // Address (from order.listing.address or order.address, or appt.address)
-    let propertyAddress = "Unknown address";
+    let propertyAddress =
+      extractAddressFromAppointment(appt) || "Unknown address";
 
-    if (
-      order.listing &&
-      order.listing.address &&
-      order.listing.address.full_address
-    ) {
-      propertyAddress = order.listing.address.full_address;
-    } else if (order.address && order.address.full_address) {
-      propertyAddress = order.address.full_address;
-    } else if (appt.address && appt.address.full_address) {
-      // fallback to appointment address if present
-      propertyAddress = appt.address.full_address;
-    } else {
-      // 🔍 Last-resort: search deeply anywhere in the order or appointment
-      const deepAddress =
-        findFullAddressDeep(order) || findFullAddressDeep(appt);
-
-      if (deepAddress) {
-        propertyAddress = deepAddress;
-        console.log("🧭 Morning briefing: found deep full_address:", deepAddress);
-      } else {
-        console.log(
-          "⚠️ Morning briefing: no full_address found on order or appointment:",
-          {
-            apptId: appt.id,
-            orderId: order.id,
-          }
-        );
-      }
-    }
-
-    const mapsUrl = propertyAddress !== "Unknown address"
-      ? buildGoogleMapsUrl(propertyAddress)
-      : null;
+    const mapsUrl =
+      propertyAddress !== "Unknown address"
+        ? buildGoogleMapsUrl(propertyAddress)
+        : null;
 
     // Photographer(s)
     let shooterNames = [];
