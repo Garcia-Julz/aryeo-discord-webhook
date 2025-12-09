@@ -464,6 +464,28 @@ function findAnyFullAddress(obj, depth = 0) {
   return null;
 }
 
+// Very loose scan for ANY address-like string in a nested object
+function findAnyAddressLikeString(obj, depth = 0) {
+  if (!obj || typeof obj !== "object" || depth > 8) return null;
+
+  for (const [key, val] of Object.entries(obj)) {
+    if (typeof val === "string") {
+      const k = key.toLowerCase();
+      if (
+        (k.includes("address") || k.includes("street") || k.includes("line1")) &&
+        val.trim().length > 5
+      ) {
+        return val.trim();
+      }
+    } else if (val && typeof val === "object") {
+      const found = findAnyAddressLikeString(val, depth + 1);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
 // Look through all likely places on the appointment + order
 function extractAddressFromAppointment(appt) {
   if (!appt) return null;
@@ -486,9 +508,13 @@ function extractAddressFromAppointment(appt) {
     if (addr) return addr;
   }
 
-  // 🔍 Fallback: deep-scan for any .full_address anywhere
+  // Fallback 1: deep-scan only for `.full_address`
   const deepAddr = findAnyFullAddress({ appointment: appt, order });
   if (deepAddr) return deepAddr;
+
+  // Fallback 2: *very* loose scan for any address-like string
+  const looseAddr = findAnyAddressLikeString({ appointment: appt, order });
+  if (looseAddr) return looseAddr;
 
   return null;
 }
