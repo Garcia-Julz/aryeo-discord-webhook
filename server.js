@@ -332,7 +332,7 @@ function buildMorningBriefingMessage(dateIso, appointments) {
   const { date: prettyDate } = formatToEastern(`${dateIso}T00:00:00Z`);
 
   let lines = [];
-  lines.push(`📅 Daily Schedule – ${prettyDate}`);
+  lines.push(`☀️🌆 Daily Schedule – ${prettyDate}`);
   lines.push("");
 
   if (!appointments || appointments.length === 0) {
