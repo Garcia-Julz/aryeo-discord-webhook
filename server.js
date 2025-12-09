@@ -88,6 +88,28 @@ function formatToEastern(isoString) {
   };
 }
 
+// Normalize a datetime to YYYY-MM-DD in US Eastern
+function getEasternYMD(isoString) {
+  if (!isoString) return null;
+
+  const d = new Date(isoString);
+  if (isNaN(d.getTime())) return null;
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(d);
+
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+
+  if (!year || !month || !day) return null;
+  return `${year}-${month}-${day}`; // YYYY-MM-DD
+}
+
 async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
   if (!webhookUrl) {
     console.error(
@@ -285,13 +307,20 @@ async function fetchAppointmentsForDate(dateIso) {
     }
 
     const json = await resp.json();
-    // Aryeo typically wraps in `data`
     const appointments = json.data || [];
+
+    // Hard-filter by Eastern local date
+    const filtered = appointments.filter((appt) => {
+      const raw = appt.start_at || appt.scheduled_at || appt.date || null;
+      const apptYmd = raw ? getEasternYMD(raw) : null;
+      return apptYmd === dateIso;
+    });
+
     console.log(
-      `✅ Morning briefing raw appointments count for ${dateIso}:`,
-      appointments.length
+      `✅ Appointments for ${dateIso}: raw=${appointments.length}, filtered=${filtered.length}`
     );
-    return appointments;
+
+    return filtered;
   } catch (err) {
     console.error("💥 Error fetching appointments from Aryeo:", err);
     return null;
@@ -1307,7 +1336,6 @@ cron.schedule(
 
 app.get("/test-morning-briefing", async (req, res) => {
   try {
-    // Figure out "today" in US Eastern, not server timezone
     const now = new Date();
     const estParts = new Intl.DateTimeFormat("en-CA", {
       timeZone: "America/New_York",
@@ -1322,174 +1350,8 @@ app.get("/test-morning-briefing", async (req, res) => {
 
     const todayEst = `${year}-${month}-${day}`; // YYYY-MM-DD
 
-    // Ask Aryeo for all appointments on this date
-    const url =
-      `https://api.aryeo.com/v1/appointments` +
-      `?filter[date]=${todayEst}` +
-      `&include=order,order.address,order.customer,order.items,order.listing,users`;
-
-    console.log("🔍 Fetching today's appointments from Aryeo:", url);
-
-    const resp = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${ARYEO_API_KEY}`,
-      },
-    });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      console.error("❌ Failed to fetch appointments:", resp.status, text);
-      return res.status(500).send("Failed to fetch appointments");
-    }
-
-    const json = await resp.json();
-    const appointments = json.data || [];
-
-    console.log(
-      "☀️ Morning briefing raw appointments:",
-      JSON.stringify(
-        appointments.map((a) => ({
-          id: a.id,
-          order_id: a.order_id || (a.order && a.order.id),
-          start_at: a.start_at || a.scheduled_at || a.date,
-        })),
-        null,
-        2
-      )
-    );
-
-    const count = appointments.length;
-
-    // Format the display date in Eastern for the message
-    const formattedDate = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York",
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-    }).format(now);
-
-    // Build the message lines
-    let lines = [];
-    lines.push(`📅 **Daily Schedule – ${formattedDate}**`);
-    lines.push("");
-    lines.push(`• **Total Appointments Today:** ${count}`);
-
-    // If there are appointments, list them with details
-    if (count > 0) {
-      lines.push("");
-      lines.push("**Today's Appointments**");
-
-      appointments.forEach((appt, index) => {
-        // Time
-        const apptTimeRaw =
-          appt.start_at || appt.scheduled_at || appt.date || null;
-        const when =
-          apptTimeRaw && typeof apptTimeRaw === "string"
-            ? formatToEastern(apptTimeRaw)
-            : { date: "unknown", time: "unknown" };
-
-        // Linked order info
-        const order = appt.order || null;
-        const orderId = order?.id || appt.order_id || null;
-        const orderNumber = order?.number || null;
-        const orderTitle = order?.title || order?.identifier || orderId;
-
-        const orderLabel =
-          (orderNumber && `Order #${orderNumber}`) ||
-          orderTitle ||
-          orderId ||
-          "Unknown Order";
-
-        const orderStatusUrl =
-          (order && (order.status_url || order.payment_url || order.invoice_url)) ||
-          (orderId
-            ? `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`
-            : null);
-
-        // Client
-        const customerName =
-          (order &&
-            order.customer &&
-            order.customer.name) ||
-          appt.customer_name ||
-          "Unknown Client";
-
-        // Location
-        let propertyAddress = "unknown";
-        if (
-          order &&
-          order.listing &&
-          order.listing.address &&
-          order.listing.address.full_address
-        ) {
-          propertyAddress = order.listing.address.full_address;
-        } else if (appt.address && appt.address.full_address) {
-          propertyAddress = appt.address.full_address;
-        }
-        const mapsUrl =
-          propertyAddress && propertyAddress !== "unknown"
-            ? buildGoogleMapsUrl(propertyAddress)
-            : null;
-
-        // Service summary from order.items
-        let serviceSummary = "unknown";
-        if (order) {
-          const items = order.items || order.order_items || [];
-          if (Array.isArray(items) && items.length > 0) {
-            const names = items
-              .map((item) => item.name || item.product_name || item.title)
-              .filter(Boolean);
-            if (names.length === 1) {
-              serviceSummary = names[0];
-            } else if (names.length > 1) {
-              const firstFew = names.slice(0, 3).join(", ");
-              serviceSummary =
-                names.length > 3
-                  ? `${firstFew} (+${names.length - 3} more)`
-                  : firstFew;
-            }
-          }
-        }
-
-        // Photographers (users on the appointment)
-        let shooterNames = [];
-        if (Array.isArray(appt.users) && appt.users.length > 0) {
-          shooterNames = appt.users
-            .map(
-              (u) =>
-                u.name ||
-                [u.first_name, u.last_name].filter(Boolean).join(" ")
-            )
-            .filter(Boolean);
-        }
-
-        lines.push("");
-        lines.push(`**${index + 1}. ${customerName}**`);
-        if (orderStatusUrl) {
-          lines.push(`• Order: [${orderLabel}](${orderStatusUrl})`);
-        } else {
-          lines.push(`• Order: \`${orderLabel}\``);
-        }
-        lines.push(`• Time: \`${when.time}\``);
-        if (serviceSummary !== "unknown") {
-          lines.push(`• Service: \`${serviceSummary}\``);
-        }
-        if (propertyAddress !== "unknown") {
-          lines.push(`• Location: \`${propertyAddress}\``);
-        }
-        if (mapsUrl) {
-          lines.push(`• Map: ${mapsUrl}`);
-        }
-        if (shooterNames.length > 0) {
-          lines.push(
-            `• Photographer: \`${shooterNames.join(", ")}\``
-          );
-        }
-      });
-    }
-
-    const content = lines.join("\n");
+    const appointments = (await fetchAppointmentsForDate(todayEst)) || [];
+    const content = buildMorningBriefingMessage(todayEst, appointments);
 
     await sendToDiscord(
       BOOKINGS_WEBHOOK_URL,
@@ -1498,7 +1360,7 @@ app.get("/test-morning-briefing", async (req, res) => {
     );
 
     res.send(
-      `Sent test morning briefing for ${todayEst}. Count = ${count}`
+      `Sent test morning briefing for ${todayEst}. Count = ${appointments.length}`
     );
   } catch (err) {
     console.error("💥 Error in /test-morning-briefing:", err);
