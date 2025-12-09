@@ -408,7 +408,7 @@ async function handleOrderPaymentReceived(activity) {
   let orderStatusUrl = null;
   let customerName = "unknown";
 
-  // We'll fill this from order.payments and/or the webhook resource
+  // This is what we will display as the amount.
   let amountLabel = "unknown";
 
   // 1) Fetch the full order so we can grab number, customer, payments, etc.
@@ -428,27 +428,53 @@ async function handleOrderPaymentReceived(activity) {
     if (Array.isArray(order.payments) && order.payments.length > 0) {
       const lastPayment = order.payments[order.payments.length - 1];
 
-      // Per Aryeo docs: total_amount / collected_amount / applicable_amount are ints in cents
-      // https://docs.aryeo.com/api/aryeo/orders/get-orders-id.md
-      if (typeof lastPayment.total_amount === "number") {
-        amountLabel = `$${(lastPayment.total_amount / 100).toFixed(2)}`;
-      } else if (typeof lastPayment.collected_amount === "number") {
-        amountLabel = `$${(lastPayment.collected_amount / 100).toFixed(2)}`;
-      } else if (typeof lastPayment.applicable_amount === "number") {
-        amountLabel = `$${(lastPayment.applicable_amount / 100).toFixed(2)}`;
+      // 🔍 TEMP: log exactly what Aryeo is sending for payments
+      console.log(
+        "💰 Payments debug for order",
+        orderId,
+        JSON.stringify(order.payments, null, 2)
+      );
+
+      // 1st: look for nicely formatted strings
+      const niceString =
+        lastPayment.total_price_formatted ||
+        lastPayment.amount_formatted ||
+        lastPayment.display_amount ||
+        lastPayment.formatted_amount ||
+        null;
+
+      if (niceString) {
+        amountLabel = niceString;
+      } else {
+        // 2nd: look for numeric amounts and format them
+        const numericCandidates = [
+          lastPayment.total_price,
+          lastPayment.amount,
+          lastPayment.subtotal_price,
+          lastPayment.payment_intent && lastPayment.payment_intent.amount,
+        ];
+
+        for (const val of numericCandidates) {
+          if (typeof val === "number") {
+            // Heuristic: large numbers are probably cents
+            if (val > 9999) {
+              amountLabel = `$${(val / 100).toFixed(2)}`;
+            } else {
+              amountLabel = `$${val.toFixed(2)}`;
+            }
+            break;
+          }
+        }
       }
     }
   }
 
   // 2) If we *still* don't know the amount, try to read it directly off the webhook payload
   if (amountLabel === "unknown" && resource) {
-    // In case Aryeo ever sends a summarized amount on the activity.resource
-    if (typeof resource.total_amount === "number") {
-      amountLabel = `$${(resource.total_amount / 100).toFixed(2)}`;
-    } else if (typeof resource.collected_amount === "number") {
-      amountLabel = `$${(resource.collected_amount / 100).toFixed(2)}`;
-    } else if (typeof resource.applicable_amount === "number") {
-      amountLabel = `$${(resource.applicable_amount / 100).toFixed(2)}`;
+    if (resource.total_price_formatted) {
+      amountLabel = resource.total_price_formatted;
+    } else if (typeof resource.total_price === "number") {
+      amountLabel = `$${(resource.total_price / 100).toFixed(2)}`;
     } else if (typeof resource.amount === "number") {
       amountLabel = `$${(resource.amount / 100).toFixed(2)}`;
     } else if (typeof resource.amount === "string") {
@@ -456,20 +482,16 @@ async function handleOrderPaymentReceived(activity) {
     }
   }
 
-  // 3) Build a friendly label for the order
+  // 3) Build a friendly label for the order (this is where "Order #1593" comes from)
   const label =
     (orderNumber && `Order #${orderNumber}`) ||
     orderTitle ||
     orderId;
 
-  // 4) Build a link to the order if Aryeo didn't give us one
-  if (!orderStatusUrl) {
-    orderStatusUrl = `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
-  }
-
-  // 5) Format payment time in Eastern (from the activity timestamp)
+  // 4) Format payment time in Eastern (from the activity timestamp)
   const when = formatToEastern(occurred_at);
 
+  // 5) Build the Discord message (no raw Order ID line)
   let lines = [];
   lines.push("💳 **Payment Received**");
   lines.push("");
