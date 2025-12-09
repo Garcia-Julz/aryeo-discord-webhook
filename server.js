@@ -195,7 +195,8 @@ async function fetchOrder(orderId) {
 
   const url =
     `https://api.aryeo.com/v1/orders/${orderId}` +
-    `?include=items,listing,customer,appointments,appointments.users,payments`;
+    // explicitly ask for listing.address and address
+    `?include=items,listing,listing.address,address,customer,appointments,appointments.users,payments`;
 
   try {
     console.log("🔍 Fetching order from Aryeo:", url);
@@ -214,22 +215,23 @@ async function fetchOrder(orderId) {
 
     const json = await resp.json();
     const order = json.data || json.order || json;
+
     console.log("✅ Aryeo order fetch success. Sample:", {
       id: order.id,
       number: order.number,
       title: order.title,
       hasCustomer: !!order.customer,
+      hasListing: !!order.listing,
+      listingHasAddress:
+        !!(order.listing &&
+           order.listing.address &&
+           order.listing.address.full_address),
+      hasOrderAddress:
+        !!(order.address && order.address.full_address),
       appointmentsType: Array.isArray(order.appointments)
         ? `array(${order.appointments.length})`
         : typeof order.appointments,
     });
-
-    if (Array.isArray(order.appointments) && order.appointments.length > 0) {
-      console.log(
-        "📝 First appointment users:",
-        JSON.stringify(order.appointments[0].users || [], null, 2)
-      );
-    }
 
     return order;
   } catch (err) {
