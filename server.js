@@ -395,7 +395,7 @@ function extractAddressFromObject(obj) {
     "full_address",
     "formatted_address",
     "address",
-    "property_full_address",   // <— whatever you see in the dump
+    "property_full_address",   // covers Aryeo property address shapes
     "property_address",
     "address_line1",
     "address1",
@@ -416,14 +416,14 @@ function extractAddressFromObject(obj) {
 
   if (!base) return null;
 
-  // City / state / postal add-ons (common naming patterns)
-  const city =
+  // First, try the "nice" explicit keys
+  let city =
     obj.city ||
     obj.locality ||
     obj.town ||
     null;
 
-  const state =
+  let state =
     obj.state ||
     obj.region ||
     obj.province ||
@@ -431,12 +431,37 @@ function extractAddressFromObject(obj) {
     obj.state_code ||
     null;
 
-  const postal =
+  let postal =
     obj.postal_code ||
     obj.zip ||
     obj.zip_code ||
     obj.postcode ||
     null;
+
+  // 🔍 NEW: if any of city/state/postal are still missing,
+  // scan all string fields and infer by key name (e.g. property_city, property_state, property_postal_code)
+  if (!city || !state || !postal) {
+    for (const [key, value] of Object.entries(obj)) {
+      if (typeof value !== "string") continue;
+      const k = key.toLowerCase();
+      const v = value.trim();
+      if (!v) continue;
+
+      if (!city && k.includes("city")) {
+        city = v;
+      } else if (
+        !state &&
+        (k.includes("state") || k.includes("province") || k.includes("region"))
+      ) {
+        state = v;
+      } else if (
+        !postal &&
+        (k.includes("postal") || k.includes("zip") || k.includes("postcode"))
+      ) {
+        postal = v;
+      }
+    }
+  }
 
   const parts = [base];
   if (city) parts.push(city);
