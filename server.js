@@ -1,6 +1,7 @@
 // server.js
 const express = require("express");
 const fetch = require("node-fetch");
+const cron = require("node-cron");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -254,6 +255,77 @@ async function fetchOrderPaymentInfo(orderId) {
     console.error("💥 Error fetching order payment-info from Aryeo:", err);
     return null;
   }
+}
+
+// Fetch today's appointments (used by the morning briefing)
+async function fetchTodaysAppointments() {
+  if (!ARYEO_API_KEY) {
+    console.log("❌ ARYEO_API_KEY missing, cannot fetch today's appointments.");
+    return [];
+  }
+
+  // Simple v1: use today's date in UTC as YYYY-MM-DD
+  const today = new Date().toISOString().slice(0, 10); // "2025-01-31"
+
+  const url =
+    `https://api.aryeo.com/v1/appointments` +
+    `?start_at=${today}&end_at=${today}` +
+    `&include=order,order.items,order.customer,users`;
+
+  try {
+    console.log("🔍 Fetching today's appointments from Aryeo:", url);
+    const resp = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${ARYEO_API_KEY}`,
+      },
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error("❌ Aryeo today's appointments fetch failed:", resp.status, text);
+      return [];
+    }
+
+    const json = await resp.json();
+    const appointments = json.data || json.appointments || [];
+    console.log(
+      "✅ Fetched today's appointments count:",
+      Array.isArray(appointments) ? appointments.length : 0
+    );
+    return appointments;
+  } catch (err) {
+    console.error("💥 Error fetching today's appointments from Aryeo:", err);
+    return [];
+  }
+}
+
+// Build & send the morning briefing to the bookings Discord channel
+async function sendMorningBriefing() {
+  const appointments = await fetchTodaysAppointments();
+  const count = Array.isArray(appointments) ? appointments.length : 0;
+
+  // Get a nice "Jan 31, 2025" style date in Eastern
+  const nowIso = new Date().toISOString();
+  const todayET = formatToEastern(nowIso).date;
+
+  let lines = [];
+  lines.push(`**Daily Schedule – ${todayET}**`);
+  lines.push("");
+  lines.push(`**Total Appointments Today:** ${count}`);
+
+  if (count === 0) {
+    lines.push("");
+    lines.push("No appointments scheduled today.");
+  }
+
+  const content = lines.join("\n");
+
+  await sendToDiscord(
+    BOOKINGS_WEBHOOK_URL,
+    { content },
+    "BOOKINGS-MORNING_BRIEFING"
+  );
 }
 
 // ---------------------------------------------------------
@@ -1099,6 +1171,24 @@ app.post("/aryeo-webhook", async (req, res) => {
     return res.status(500).send("Server error");
   }
 });
+
+// ---------------------------------------------------------
+// Cron Jobs
+// ---------------------------------------------------------
+
+// Run every day at 7:00 AM Eastern
+cron.schedule(
+  "0 7 * * *",
+  () => {
+    console.log("⏰ Running daily morning briefing...");
+    sendMorningBriefing().catch((err) => {
+      console.error("💥 Error in sendMorningBriefing:", err);
+    });
+  },
+  {
+    timezone: "America/New_York",
+  }
+);
 
 // ---------------------------------------------------------
 // SIMPLE TEST ROUTES (no Aryeo involved)
