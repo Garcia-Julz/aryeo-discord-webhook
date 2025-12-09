@@ -487,24 +487,22 @@ async function handleOrderPaymentReceived(activity) {
       if (niceString) {
         amountLabel = niceString;
       } else {
-        // 2nd: look for numeric amounts and format them
+        // 2nd: look for numeric amounts and format them (ignore 0s)
         const numericCandidates = [
           lastPayment.total_price,
           lastPayment.amount,
           lastPayment.subtotal_price,
           lastPayment.payment_intent && lastPayment.payment_intent.amount,
-        ];
+        ].filter((val) => typeof val === "number" && val > 0);
 
         for (const val of numericCandidates) {
-          if (typeof val === "number") {
-            // Heuristic: large numbers are probably cents
-            if (val > 9999) {
-              amountLabel = `$${(val / 100).toFixed(2)}`;
-            } else {
-              amountLabel = `$${val.toFixed(2)}`;
-            }
-            break;
+          // Heuristic: large numbers are probably cents
+          if (val > 9999) {
+            amountLabel = `$${(val / 100).toFixed(2)}`;
+          } else {
+            amountLabel = `$${val.toFixed(2)}`;
           }
+          break;
         }
       }
     }
@@ -560,17 +558,15 @@ async function handleOrderPaymentReceived(activity) {
           paymentInfo.total_amount,
           paymentInfo.amount,
           paymentInfo.subtotal_price,
-        ];
+        ].filter((val) => typeof val === "number" && val > 0);
 
         for (const val of numericCandidates) {
-          if (typeof val === "number") {
-            if (val > 9999) {
-              amountLabel = `$${(val / 100).toFixed(2)}`;
-            } else {
-              amountLabel = `$${val.toFixed(2)}`;
-            }
-            break;
+          if (val > 9999) {
+            amountLabel = `$${(val / 100).toFixed(2)}`;
+          } else {
+            amountLabel = `$${val.toFixed(2)}`;
           }
+          break;
         }
       }
     }
