@@ -157,9 +157,11 @@ async function fetchOrder(orderId) {
     return null;
   }
 
+  // NOTE: `address` is NOT allowed in include list.
+  // We include listing and then use listing.address.
   const url =
     `https://api.aryeo.com/v1/orders/${orderId}` +
-    `?include=items,listing,customer,address,appointments,appointments.users`;
+    `?include=items,listing,customer,appointments,appointments.users`;
 
   try {
     console.log("🔍 Fetching order from Aryeo:", url);
@@ -182,7 +184,7 @@ async function fetchOrder(orderId) {
       id: order.id,
       number: order.number,
       title: order.title,
-      hasAddress: !!order.address,
+      hasListing: !!order.listing,
       hasCustomer: !!order.customer,
       appointmentsType: Array.isArray(order.appointments)
         ? `array(${order.appointments.length})`
@@ -247,8 +249,25 @@ async function handleOrderCreated(activity) {
       customerName = order.customer.name;
     }
 
-    // Address – try unparsed_address first, then build from pieces
-    if (order.address) {
+    // Address – prefer listing.address, fallback to order.address if it exists
+    if (order.listing && order.listing.address) {
+      const addr = order.listing.address;
+      propertyAddress =
+        addr.unparsed_address ||
+        [
+          addr.address_line_1,
+          addr.address_line_2,
+          addr.city,
+          addr.state_or_province || addr.state,
+          addr.postal_code,
+        ]
+          .filter(Boolean)
+          .join(", ") ||
+        "unknown";
+
+      mapsUrl = buildGoogleMapsUrl(propertyAddress);
+    } else if (order.address) {
+      // Fallback in case order.address is actually present for you
       const addr = order.address;
       propertyAddress =
         addr.unparsed_address ||
