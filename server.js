@@ -14,11 +14,11 @@ const QUICKBOOKS_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_QUICKBOOKS;
 const DRONE_MENTION = process.env.DRONE_MENTION || "@DronePilot";
 
 // Map Aryeo user names -> Discord mentions
-// Adjust the keys ("Julian Garcia", "Que Mckenzie") to match
+// Adjust the keys ("Julian Garcia", "Que McKenzie") to match
 // exactly how Aryeo returns their names in appointments.users.
 const PHOTOGRAPHER_DISCORD_MAP = {
   "Julian Garcia": "<@294642333352198148>",
-  "Que Mckenzie": "<@242693007453847552>",
+  "Que McKenzie": "<@242693007453847552>",
 };
 
 console.log("Boot: ARYEO_WEBHOOK_SECRET present?", !!ARYEO_WEBHOOK_SECRET);
