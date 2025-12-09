@@ -1215,7 +1215,7 @@ app.get("/test-morning-briefing", async (req, res) => {
     const url =
       `https://api.aryeo.com/v1/appointments` +
       `?filter[date]=${todayEst}` +
-      `&include=order,order.customer,order.items,users,listing`;
+      `&include=order,order.address,order.customer,order.items,order.listing,users`;
 
     console.log("🔍 Fetching today's appointments from Aryeo:", url);
 
