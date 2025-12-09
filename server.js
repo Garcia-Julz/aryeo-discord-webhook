@@ -168,7 +168,7 @@ async function fetchOrder(orderId) {
 
   const url =
     `https://api.aryeo.com/v1/orders/${orderId}` +
-    `?include=items,listing,customer,appointments,appointments.users,payments`;
+    `?include=items,listing,customer,appointments,appointments.users,payments,payments.payment_intent`;
 
   try {
     console.log("🔍 Fetching order from Aryeo:", url);
@@ -458,17 +458,22 @@ async function handleOrderPaymentReceived(activity) {
   // 🔹 NEW: find latest payment & get amount
   let amountLabel = "unknown";
 
-  if (order && Array.isArray(order.payments) && order.payments.length > 0) {
-    const lastPayment = order.payments[order.payments.length - 1];
+if (order && Array.isArray(order.payments) && order.payments.length > 0) {
+  const lastPayment = order.payments[order.payments.length - 1];
 
-    // Try a few likely fields – adjust once you see real data in logs
-    amountLabel =
-      lastPayment.amount_formatted ||
-      lastPayment.total_price_formatted ||
-      lastPayment.amount ||
-      lastPayment.total_price ||
-      "unknown";
+  // Try Stripe-like amount in cents
+  if (typeof lastPayment.amount === "number") {
+    amountLabel = `$${(lastPayment.amount / 100).toFixed(2)}`;
   }
+
+  // Try payment_intent.amount (Stripe)
+  if (
+    lastPayment.payment_intent &&
+    typeof lastPayment.payment_intent.amount === "number"
+  ) {
+    amountLabel = `$${(lastPayment.payment_intent.amount / 100).toFixed(2)}`;
+  }
+}
 
   let lines = [];
   lines.push("💳 **Payment Received**");
@@ -478,7 +483,6 @@ async function handleOrderPaymentReceived(activity) {
   } else {
     lines.push(`• Order: \`${label}\``);
   }
-  lines.push(`• Order ID: \`${orderId}\``);
   if (customerName !== "unknown") {
     lines.push(`• Client: \`${customerName}\``);
   }
