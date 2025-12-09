@@ -371,6 +371,12 @@ async function fetchAppointmentsForDate(dateIso) {
             sample.address && sample.address.full_address,
         }
       );
+
+      // NEW: dump full object so we can see where Aryeo hides the address
+      console.log(
+        "🧨 FULL ENRICHED APPOINTMENT DUMP:",
+        JSON.stringify(sample, null, 2)
+      );
     }
 
     return enriched;
@@ -394,6 +400,8 @@ function extractAddressFromObject(obj) {
     "line1",
     "street1",
     "street",
+    "street_line_1",   // <--- add these two
+    "street_line_2",
   ];
 
   let base = null;
@@ -418,6 +426,7 @@ function extractAddressFromObject(obj) {
     obj.region ||
     obj.province ||
     obj.state_province ||
+    obj.state_code ||
     null;
 
   const postal =
@@ -433,6 +442,24 @@ function extractAddressFromObject(obj) {
   if (postal) parts.push(postal);
 
   return parts.join(", ");
+}
+
+// Deep scan for any .full_address field anywhere in a nested object
+function findAnyFullAddress(obj, depth = 0) {
+  if (!obj || typeof obj !== "object" || depth > 8) return null;
+
+  if (typeof obj.full_address === "string" && obj.full_address.trim()) {
+    return obj.full_address.trim();
+  }
+
+  for (const val of Object.values(obj)) {
+    if (val && typeof val === "object") {
+      const found = findAnyFullAddress(val, depth + 1);
+      if (found) return found;
+    }
+  }
+
+  return null;
 }
 
 // Look through all likely places on the appointment + order
@@ -451,10 +478,15 @@ function extractAddressFromAppointment(appt) {
     appt,
   ];
 
+  // First try the "known shapes"
   for (const obj of candidates) {
     const addr = extractAddressFromObject(obj);
     if (addr) return addr;
   }
+
+  // 🔍 Fallback: deep-scan for any .full_address anywhere
+  const deepAddr = findAnyFullAddress({ appointment: appt, order });
+  if (deepAddr) return deepAddr;
 
   return null;
 }
@@ -644,8 +676,13 @@ async function handleOrderCreated(activity) {
     if (order.listing && order.listing.address && order.listing.address.full_address) {
       propertyAddress = order.listing.address.full_address;
     } else if (order.address && order.address.full_address) {
-      // fallback if you ever add "address" as allowed include
       propertyAddress = order.address.full_address;
+    } else {
+      // Fallback to deep scan, just like the morning briefing
+      const deepAddr = findAnyFullAddress(order);
+      if (deepAddr) {
+        propertyAddress = deepAddr;
+      }
     }
 
     if (propertyAddress && propertyAddress !== "unknown") {
