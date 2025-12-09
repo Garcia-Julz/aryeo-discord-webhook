@@ -395,12 +395,14 @@ function extractAddressFromObject(obj) {
     "full_address",
     "formatted_address",
     "address",
+    "property_full_address",   // <— whatever you see in the dump
+    "property_address",
     "address_line1",
     "address1",
     "line1",
     "street1",
     "street",
-    "street_line_1",   // <--- add these two
+    "street_line_1",
     "street_line_2",
   ];
 
