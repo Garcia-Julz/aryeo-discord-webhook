@@ -13,6 +13,14 @@ const DRONE_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_DRONE;
 const QUICKBOOKS_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_QUICKBOOKS;
 const DRONE_MENTION = process.env.DRONE_MENTION || "@DronePilot";
 
+// Map Aryeo user names -> Discord mentions
+// Adjust the keys ("Julian Garcia", "Que Mckenzie") to match
+// exactly how Aryeo returns their names in appointments.users.
+const PHOTOGRAPHER_DISCORD_MAP = {
+  "Julian Garcia": "<@294642333352198148>",
+  "Que Mckenzie": "<@242693007453847552>",
+};
+
 console.log("Boot: ARYEO_WEBHOOK_SECRET present?", !!ARYEO_WEBHOOK_SECRET);
 console.log("Boot: ARYEO_API_KEY present?", !!ARYEO_API_KEY);
 console.log("Boot: DRONE_WEBHOOK_URL present?", !!DRONE_WEBHOOK_URL);
@@ -38,41 +46,7 @@ function verifyAryeoSignature(rawBody, signatureHeader) {
 // SHARED HELPERS
 // ---------------------------------------------------------
 
-async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
-  if (!webhookUrl) {
-    console.error(`❌ Missing Discord webhook URL for [${contextLabel || "notification"}]`);
-    return;
-  }
-
-  // Allow payload to be string (content) or object ({content, embeds, ...})
-  const body =
-    typeof payload === "string"
-      ? { content: payload }
-      : payload;
-
-  try {
-    console.log(`➡️ Sending to Discord [${contextLabel}]…`);
-    const resp = await fetch(webhookUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    console.log(`📨 Discord status [${contextLabel}]:`, resp.status);
-    if (!resp.ok) {
-      const text = await resp.text();
-      console.error("❌ Discord error response:", text);
-    }
-  } catch (err) {
-    console.error(`❌ Error sending to Discord [${contextLabel}]:`, err);
-  }
-}
-
-function buildGoogleMapsUrl(addressString) {
-  if (!addressString) return null;
-  const encoded = encodeURIComponent(addressString);
-  return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
-}
-
+// Format ISO date/time to US Eastern
 function formatToEastern(isoString) {
   if (!isoString) {
     return { date: "unknown", time: "unknown" };
@@ -102,6 +76,40 @@ function formatToEastern(isoString) {
   };
 }
 
+async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
+  if (!webhookUrl) {
+    console.error(`❌ Missing Discord webhook URL for [${contextLabel || "notification"}]`);
+    return;
+  }
+
+  const body =
+    typeof payload === "string"
+      ? { content: payload }
+      : payload;
+
+  try {
+    console.log(`➡️ Sending to Discord [${contextLabel}]…`);
+    const resp = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    console.log(`📨 Discord status [${contextLabel}]:`, resp.status);
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error("❌ Discord error response:", text);
+    }
+  } catch (err) {
+    console.error(`❌ Error sending to Discord [${contextLabel}]:`, err);
+  }
+}
+
+function buildGoogleMapsUrl(addressString) {
+  if (!addressString) return null;
+  const encoded = encodeURIComponent(addressString);
+  return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
+}
+
 // Very simple drone-detection helper.
 // Adjust keywords if your product names change.
 function orderRequiresDrone(order) {
@@ -113,10 +121,7 @@ function orderRequiresDrone(order) {
     "property listing video", // you said this uses drone when permitted
   ];
 
-  const items =
-    order.items ||
-    order.order_items ||
-    [];
+  const items = order.items || order.order_items || [];
 
   if (!Array.isArray(items) || items.length === 0) {
     console.log("ℹ️ No order items found when checking for drone.");
@@ -146,14 +151,15 @@ function orderRequiresDrone(order) {
 }
 
 // Fetch order details from Aryeo.
-// NOTE: field names may need tiny tweaks based on your real response.
 async function fetchOrder(orderId) {
   if (!ARYEO_API_KEY) {
     console.log("❌ ARYEO_API_KEY missing, cannot fetch order.");
     return null;
   }
 
-  const url = `https://api.aryeo.com/v1/orders/${orderId}?include=appointments,customer,address,items`;
+  const url =
+    `https://api.aryeo.com/v1/orders/${orderId}` +
+    `?include=items,listing,customer,address,appointments,appointments.users`;
 
   try {
     console.log("🔍 Fetching order from Aryeo:", url);
@@ -183,6 +189,14 @@ async function fetchOrder(orderId) {
         : typeof order.appointments,
     });
 
+    // Helpful once to see the appointment structure:
+    if (Array.isArray(order.appointments) && order.appointments.length > 0) {
+      console.log(
+        "📝 First appointment users:",
+        JSON.stringify(order.appointments[0].users || [], null, 2)
+      );
+    }
+
     return order;
   } catch (err) {
     console.error("💥 Error fetching order from Aryeo:", err);
@@ -210,7 +224,6 @@ async function handleOrderCreated(activity) {
 
   let appointmentDate = "unknown";
   let appointmentTime = "unknown";
-  let appointmentRaw = null;
 
   let propertyAddress = "unknown";
   let mapsUrl = null;
@@ -218,6 +231,9 @@ async function handleOrderCreated(activity) {
   let customerName = "unknown";
   let requiresDrone = null; // null = unknown, true/false = known
   let serviceSummary = "unknown";
+
+  let photographerNames = [];
+  let photographerMentions = [];
 
   const order = await fetchOrder(orderId);
 
@@ -253,12 +269,31 @@ async function handleOrderCreated(activity) {
     // Appointment – take first appointment if present
     if (Array.isArray(order.appointments) && order.appointments.length > 0) {
       const appt = order.appointments[0];
-      appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+      const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
 
       if (appointmentRaw && typeof appointmentRaw === "string") {
         const formatted = formatToEastern(appointmentRaw);
         appointmentDate = formatted.date;
         appointmentTime = formatted.time;
+      }
+
+      // Assigned users (photographers) on this appointment
+      if (Array.isArray(appt.users) && appt.users.length > 0) {
+        appt.users.forEach((u) => {
+          const userName =
+            u.name ||
+            [u.first_name, u.last_name].filter(Boolean).join(" ") ||
+            null;
+
+          if (userName) {
+            photographerNames.push(userName);
+
+            const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
+            if (mention) {
+              photographerMentions.push(mention);
+            }
+          }
+        });
       }
     }
 
@@ -315,6 +350,14 @@ async function handleOrderCreated(activity) {
 
   lines.push(`• Service: \`${serviceSummary}\``);
 
+  if (photographerNames.length > 0) {
+    const label =
+      photographerNames.length === 1
+        ? photographerNames[0]
+        : photographerNames.join(", ");
+    lines.push(`• Photographer: \`${label}\``);
+  }
+
   lines.push("");
   lines.push("**Appointment**");
   lines.push(`• Date: \`${appointmentDate}\``);
@@ -330,7 +373,11 @@ async function handleOrderCreated(activity) {
   lines.push("• Use the Air Control app to verify airspace for this location.");
   lines.push("• Confirm: Allowed / Restricted / Permit Required.");
 
-  if (DRONE_MENTION) {
+  // Mentions: prefer specific shooters if we recognized them; otherwise use generic role
+  if (photographerMentions.length > 0) {
+    lines.push("");
+    lines.push(photographerMentions.join(" "));
+  } else if (DRONE_MENTION) {
     lines.push("");
     lines.push(DRONE_MENTION);
   }
@@ -360,7 +407,8 @@ async function handleOrderPaymentReceived(activity) {
   if (order) {
     orderTitle = order.title || order.identifier || orderId;
     orderNumber = order.number || null;
-    orderStatusUrl = order.status_url || order.invoice_url || order.payment_url || null;
+    orderStatusUrl =
+      order.status_url || order.invoice_url || order.payment_url || null;
 
     if (order.customer && order.customer.name) {
       customerName = order.customer.name;
@@ -384,7 +432,6 @@ async function handleOrderPaymentReceived(activity) {
   if (customerName !== "unknown") {
     lines.push(`• Client: \`${customerName}\``);
   }
-  lines.push(`• Time (UTC): ${occurred_at}`);
 
   const content = lines.join("\n");
 
