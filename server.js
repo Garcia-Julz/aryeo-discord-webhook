@@ -73,6 +73,35 @@ function buildGoogleMapsUrl(addressString) {
   return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
+function formatToEastern(isoString) {
+  if (!isoString) {
+    return { date: "unknown", time: "unknown" };
+  }
+
+  const d = new Date(isoString);
+  if (isNaN(d.getTime())) {
+    return { date: "unknown", time: "unknown" };
+  }
+
+  const dateFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  });
+
+  const timeFormatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+
+  return {
+    date: dateFormatter.format(d),         // e.g. "Feb 01, 2025"
+    time: timeFormatter.format(d) + " ET", // e.g. "10:30 AM ET"
+  };
+}
+
 // Very simple drone-detection helper.
 // Adjust keywords if your product names change.
 function orderRequiresDrone(order) {
