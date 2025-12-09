@@ -12,6 +12,10 @@ const ARYEO_WEBHOOK_SECRET = process.env.ARYEO_WEBHOOK_SECRET;
 // API key used to call Aryeo REST API
 const ARYEO_API_KEY = process.env.ARYEO_API_KEY;
 
+// Base URL for your Aryeo dashboard (used to build order links)
+const ARYEO_ADMIN_BASE_URL =
+  process.env.ARYEO_ADMIN_BASE_URL || "https://textured-media.aryeo.com";
+
 // Discord webhooks
 const DRONE_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_DRONE;
 const QUICKBOOKS_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_QUICKBOOKS;
@@ -403,10 +407,11 @@ async function handleOrderPaymentReceived(activity) {
   let orderNumber = null;
   let orderStatusUrl = null;
   let customerName = "unknown";
-  let amountPaid = "unknown";
-  let paidDate = "unknown";
-  let paidTime = "unknown";
 
+  // We'll fill this below from either order.payments or the webhook resource
+  let amountLabel = "unknown";
+
+  // 1) Fetch the full order so we can grab number, customer, payments, etc.
   const order = await fetchOrder(orderId);
 
   if (order) {
@@ -419,61 +424,53 @@ async function handleOrderPaymentReceived(activity) {
       customerName = order.customer.name;
     }
 
-    // Try to get the most recent payment for amount
+    // Try to infer amount from the latest payment on the order
     if (Array.isArray(order.payments) && order.payments.length > 0) {
-      const p = order.payments[order.payments.length - 1];
+      const lastPayment = order.payments[order.payments.length - 1];
 
-      // Try a few common fields for a "nice" amount label
-      let label = null;
-      if (p.total_price_formatted) {
-        label = p.total_price_formatted; // e.g. "$250.00"
-      } else if (typeof p.total === "number") {
-        label = `$${p.total.toFixed(2)}`;
-      } else if (p.amount && typeof p.amount === "number") {
-        label = `$${p.amount.toFixed(2)}`;
-      } else if (p.amount && typeof p.amount === "string") {
-        label = p.amount;
-      }
-
-      if (label) {
-        amountPaid = label;
+      // Best guess: Stripe-style cents on payment_intent
+      if (
+        lastPayment.payment_intent &&
+        typeof lastPayment.payment_intent.amount === "number"
+      ) {
+        amountLabel = `$${(lastPayment.payment_intent.amount / 100).toFixed(2)}`;
+      } else if (typeof lastPayment.amount === "number") {
+        // Fallback if amount is a plain number (cents or dollars)
+        // If this ends up being off, we can tweak the /100 logic after
+        amountLabel = `$${(lastPayment.amount / 100).toFixed(2)}`;
+      } else if (lastPayment.total_price_formatted) {
+        // Nicely formatted string, if Aryeo provides it
+        amountLabel = lastPayment.total_price_formatted;
       }
     }
   }
 
-  // Use occurred_at as "payment happened" time, formatted to Eastern
-  if (occurred_at) {
-    const formatted = formatToEastern(occurred_at);
-    paidDate = formatted.date;
-    paidTime = formatted.time;
+  // 2) If we *still* don't know the amount, try to read it directly off the webhook payload
+  if (amountLabel === "unknown" && resource) {
+    if (resource.total_price_formatted) {
+      amountLabel = resource.total_price_formatted;
+    } else if (typeof resource.total_price === "number") {
+      amountLabel = `$${(resource.total_price / 100).toFixed(2)}`;
+    } else if (typeof resource.amount === "number") {
+      amountLabel = `$${(resource.amount / 100).toFixed(2)}`;
+    } else if (typeof resource.amount === "string") {
+      amountLabel = resource.amount;
+    }
   }
 
+  // 3) Build a friendly label for the order
   const label =
     (orderNumber && `Order #${orderNumber}`) ||
     orderTitle ||
     orderId;
 
+  // 4) Build a link to the order if Aryeo didn't give us a status/invoice/payment URL
+  if (!orderStatusUrl) {
+    orderStatusUrl = `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
+  }
+
+  // 5) Format payment time in Eastern (from the activity timestamp)
   const when = formatToEastern(occurred_at);
-
-  // 🔹 NEW: find latest payment & get amount
-  let amountLabel = "unknown";
-
-if (order && Array.isArray(order.payments) && order.payments.length > 0) {
-  const lastPayment = order.payments[order.payments.length - 1];
-
-  // Try Stripe-like amount in cents
-  if (typeof lastPayment.amount === "number") {
-    amountLabel = `$${(lastPayment.amount / 100).toFixed(2)}`;
-  }
-
-  // Try payment_intent.amount (Stripe)
-  if (
-    lastPayment.payment_intent &&
-    typeof lastPayment.payment_intent.amount === "number"
-  ) {
-    amountLabel = `$${(lastPayment.payment_intent.amount / 100).toFixed(2)}`;
-  }
-}
 
   let lines = [];
   lines.push("💳 **Payment Received**");
