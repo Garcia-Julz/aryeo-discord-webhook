@@ -215,6 +215,47 @@ async function fetchOrder(orderId) {
   }
 }
 
+// Fetch payment-info for an order (extra endpoint Aryeo exposes)
+async function fetchOrderPaymentInfo(orderId) {
+  if (!ARYEO_API_KEY) {
+    console.log("❌ ARYEO_API_KEY missing, cannot fetch order payment-info.");
+    return null;
+  }
+
+  const url = `https://api.aryeo.com/v1/orders/${orderId}/payment-info`;
+
+  try {
+    console.log("🔍 Fetching order payment-info from Aryeo:", url);
+    const resp = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${ARYEO_API_KEY}`,
+      },
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error("❌ Aryeo order payment-info fetch failed:", resp.status, text);
+      return null;
+    }
+
+    const json = await resp.json();
+
+    // Log once so we can see field names in the Railway logs
+    console.log(
+      "💰 Payment-info debug for order",
+      orderId,
+      JSON.stringify(json, null, 2)
+    );
+
+    // Some Aryeo endpoints wrap in `data`, some don't
+    return json.data || json;
+  } catch (err) {
+    console.error("💥 Error fetching order payment-info from Aryeo:", err);
+    return null;
+  }
+}
+
 // ---------------------------------------------------------
 // EVENT HANDLERS
 // ---------------------------------------------------------
@@ -428,14 +469,13 @@ async function handleOrderPaymentReceived(activity) {
     if (Array.isArray(order.payments) && order.payments.length > 0) {
       const lastPayment = order.payments[order.payments.length - 1];
 
-      // 🔍 TEMP: log exactly what Aryeo is sending for payments
       console.log(
         "💰 Payments debug for order",
         orderId,
         JSON.stringify(order.payments, null, 2)
       );
 
-      // 1st: look for nicely formatted strings
+      // First: look for already-formatted strings
       const niceString =
         lastPayment.total_price_formatted ||
         lastPayment.amount_formatted ||
@@ -446,7 +486,7 @@ async function handleOrderPaymentReceived(activity) {
       if (niceString) {
         amountLabel = niceString;
       } else {
-        // 2nd: look for numeric amounts and format them
+        // Second: fall back to numeric amounts
         const numericCandidates = [
           lastPayment.total_price,
           lastPayment.amount,
@@ -482,16 +522,63 @@ async function handleOrderPaymentReceived(activity) {
     }
   }
 
-  // 3) Build a friendly label for the order (this is where "Order #1593" comes from)
+  // 3) If we *still* don't know, hit the payment-info endpoint
+  if (amountLabel === "unknown") {
+    const paymentInfo = await fetchOrderPaymentInfo(orderId);
+    if (paymentInfo) {
+      // Log the raw shape so we can adjust field names once we see it.
+      console.log(
+        "💳 payment-info payload for order",
+        orderId,
+        JSON.stringify(paymentInfo, null, 2)
+      );
+
+      const niceString =
+        paymentInfo.total_price_formatted ||
+        paymentInfo.total_amount_formatted ||
+        paymentInfo.amount_formatted ||
+        paymentInfo.display_amount ||
+        paymentInfo.formatted_amount ||
+        null;
+
+      if (niceString) {
+        amountLabel = niceString;
+      } else {
+        const numericCandidates = [
+          paymentInfo.total_price,
+          paymentInfo.total_amount,
+          paymentInfo.amount,
+          paymentInfo.subtotal_price,
+        ];
+
+        for (const val of numericCandidates) {
+          if (typeof val === "number") {
+            if (val > 9999) {
+              amountLabel = `$${(val / 100).toFixed(2)}`;
+            } else {
+              amountLabel = `$${val.toFixed(2)}`;
+            }
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  // 4) Build a friendly label for the order
   const label =
     (orderNumber && `Order #${orderNumber}`) ||
     orderTitle ||
     orderId;
 
-  // 4) Format payment time in Eastern (from the activity timestamp)
+  // 5) If Aryeo didn't give us a direct URL, fall back to your admin link
+  if (!orderStatusUrl) {
+    orderStatusUrl = `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
+  }
+
+  // 6) Format payment time in Eastern (from the activity timestamp)
   const when = formatToEastern(occurred_at);
 
-  // 5) Build the Discord message (no raw Order ID line)
   let lines = [];
   lines.push("💳 **Payment Received**");
   lines.push("");
