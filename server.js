@@ -512,13 +512,23 @@ async function handleOrderPaymentReceived(activity) {
 
   // 2) If we *still* don't know the amount, try to read it directly off the webhook payload
   if (amountLabel === "unknown" && resource) {
+    // Log the raw webhook payload so we can see exactly what Aryeo sends
+    console.log(
+      "💰 Webhook resource for ORDER_PAYMENT_RECEIVED:",
+      JSON.stringify(resource, null, 2)
+    );
+
     if (resource.total_price_formatted) {
       amountLabel = resource.total_price_formatted;
-    } else if (typeof resource.total_price === "number") {
-      amountLabel = `$${(resource.total_price / 100).toFixed(2)}`;
-    } else if (typeof resource.amount === "number") {
-      amountLabel = `$${(resource.amount / 100).toFixed(2)}`;
-    } else if (typeof resource.amount === "string") {
+    } else if (typeof resource.total_price === "number" && resource.total_price !== 0) {
+      const val = resource.total_price;
+      const dollars = val > 9999 ? val / 100 : val;
+      amountLabel = `$${dollars.toFixed(2)}`;
+    } else if (typeof resource.amount === "number" && resource.amount !== 0) {
+      const val = resource.amount;
+      const dollars = val > 9999 ? val / 100 : val;
+      amountLabel = `$${dollars.toFixed(2)}`;
+    } else if (typeof resource.amount === "string" && resource.amount.trim() !== "") {
       amountLabel = resource.amount;
     }
   }
