@@ -508,6 +508,32 @@ async function handleOrderPaymentReceived(activity) {
     }
   }
 
+  // 1b) If we still don't know the amount, try totals on the order itself
+  if (amountLabel === "unknown" && order) {
+    const orderNiceString =
+      order.total_price_formatted ||
+      order.total_amount_formatted ||
+      order.order_total_formatted ||
+      null;
+
+    if (orderNiceString) {
+      amountLabel = orderNiceString;
+    } else {
+      const orderNumericCandidates = [
+        order.total_price,
+        order.total_amount,
+        order.subtotal_price,
+        order.order_total,
+      ].filter((val) => typeof val === "number" && val > 0);
+
+      for (const val of orderNumericCandidates) {
+        const dollars = val > 9999 ? val / 100 : val;
+        amountLabel = `$${dollars.toFixed(2)}`;
+        break;
+      }
+    }
+  }
+
   // 2) If we *still* don't know the amount, try to read it directly off the webhook payload
   if (amountLabel === "unknown" && resource) {
     // Log the raw webhook payload so we can see exactly what Aryeo sends
