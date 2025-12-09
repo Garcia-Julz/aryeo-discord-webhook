@@ -425,49 +425,45 @@ async function handleOrderPaymentReceived(activity) {
     }
 
     // Try to infer amount from the latest payment on the order
-  if (Array.isArray(order.payments) && order.payments.length > 0) {
-    const lastPayment = order.payments[order.payments.length - 1];
+    if (Array.isArray(order.payments) && order.payments.length > 0) {
+      const lastPayment = order.payments[order.payments.length - 1];
 
-    // 🔍 TEMP: log exactly what Aryeo is sending for payments
-    console.log(
-      "💰 Payments debug for order",
-      orderId,
-      JSON.stringify(order.payments, null, 2)
-    );
+      // 🔍 TEMP: log exactly what Aryeo is sending for payments
+      console.log(
+        "💰 Payments debug for order",
+        orderId,
+        JSON.stringify(order.payments, null, 2)
+      );
 
-    // 1st: look for nicely formatted strings Aryeo might give us
-    const niceString =
-      lastPayment.total_price_formatted ||
-      lastPayment.amount_formatted ||
-      lastPayment.display_amount ||
-      lastPayment.formatted_amount ||
-      null;
+      // 1st: look for nicely formatted strings
+      const niceString =
+        lastPayment.total_price_formatted ||
+        lastPayment.amount_formatted ||
+        lastPayment.display_amount ||
+        lastPayment.formatted_amount ||
+        null;
 
-    if (niceString) {
-      amountLabel = niceString;
-    } else if (typeof lastPayment.amount === "string") {
-      // 2nd: if amount is a plain string like "944.50" or "$944.50"
-      amountLabel = lastPayment.amount.startsWith("$")
-        ? lastPayment.amount
-        : `$${lastPayment.amount}`;
-    } else {
-      // 3rd: look for numeric amounts and format them
-      const numericCandidates = [
-        lastPayment.total_price,
-        lastPayment.amount,
-        lastPayment.subtotal_price,
-        lastPayment.payment_intent && lastPayment.payment_intent.amount,
-      ];
+      if (niceString) {
+        amountLabel = niceString;
+      } else {
+        // 2nd: look for numeric amounts and format them
+        const numericCandidates = [
+          lastPayment.total_price,
+          lastPayment.amount,
+          lastPayment.subtotal_price,
+          lastPayment.payment_intent && lastPayment.payment_intent.amount,
+        ];
 
-      for (const val of numericCandidates) {
-        if (typeof val === "number") {
-          // Heuristic: large numbers are probably cents
-          if (val > 9999) {
-            amountLabel = `$${(val / 100).toFixed(2)}`;
-          } else {
-            amountLabel = `$${val.toFixed(2)}`;
+        for (const val of numericCandidates) {
+          if (typeof val === "number") {
+            // Heuristic: large numbers are probably cents
+            if (val > 9999) {
+              amountLabel = `$${(val / 100).toFixed(2)}`;
+            } else {
+              amountLabel = `$${val.toFixed(2)}`;
+            }
+            break;
           }
-          break;
         }
       }
     }
