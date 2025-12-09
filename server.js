@@ -148,36 +148,46 @@ function orderRequiresDrone(order) {
 // EVENT HANDLERS
 // ---------------------------------------------------------
 
-// ORDER_CREATED → used for DRONE notifications
+// ORDER_CREATED → send to DRONE channel (always sends; marks drone yes/no/unknown)
 async function handleOrderCreated(activity) {
   const { occurred_at, resource } = activity;
   const orderId = resource?.id;
 
   let orderTitle = orderId;
-  let requiresDrone = false;
+  let requiresDrone = null; // null = unknown, true/false = known
 
-  if (orderId) {
+  if (!orderId) {
+    console.log("ℹ️ ORDER_CREATED with no orderId in resource");
+  } else if (!ARYEO_API_KEY) {
+    console.log("❌ ARYEO_API_KEY missing, cannot check for drone products.");
+  } else {
+    // Try to fetch from Aryeo and detect drone
     const order = await fetchOrder(orderId);
     if (order) {
       orderTitle = order.title || order.identifier || orderId;
       requiresDrone = orderRequiresDrone(order);
+    } else {
+      console.log("ℹ️ No order data returned from Aryeo, cannot determine drone.");
     }
   }
 
-  // If you only care about drone orders, we can skip non-drone:
-  if (!requiresDrone) {
-    console.log("ℹ️ Order does not require drone, no drone notification sent.");
-    return;
-  }
+  let droneFlagLabel = "unknown";
+
+  if (requiresDrone === true) droneFlagLabel = "yes";
+  if (requiresDrone === false) droneFlagLabel = "no";
 
   let message =
-    `🆕 **New Drone Order**\n` +
+    `🆕 **New Order Created**\n` +
     `• Order: \`${orderTitle}\`\n` +
     `• Order ID: \`${orderId}\`\n` +
-    `• Time (UTC): ${occurred_at}\n\n` +
-    `🚁 **Drone Package Detected** — ${DRONE_MENTION}, please check FAA airspace for this location.`;
+    `• Time (UTC): ${occurred_at}\n` +
+    `• Drone Required: \`${droneFlagLabel}\``;
 
-  await sendToDiscord(DRONE_WEBHOOK_URL, message);
+  if (requiresDrone === true) {
+    message += `\n\n🚁 **Drone Package Detected** — ${DRONE_MENTION || "@DronePilot"}, please check FAA airspace for this location.`;
+  }
+
+  await sendToDiscord(DRONE_WEBHOOK_URL, message, "DRONE");
 }
 
 // ORDER_PAYMENT_RECEIVED → used for QuickBooks / payment notifications
