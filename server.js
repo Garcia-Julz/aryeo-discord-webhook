@@ -819,6 +819,7 @@ async function handlePhotographerAssignmentChanged(activity) {
   const appointmentId = resource?.id || resource?.appointment_id;
   const orderId = resource?.order_id || resource?.order?.id;
 
+  // Shooter names / mentions (same as before)
   let shooterNames = [];
   let shooterMentions = [];
 
@@ -847,32 +848,194 @@ async function handlePhotographerAssignmentChanged(activity) {
     });
   }
 
+  // Direction: assigned vs unassigned
+  const direction =
+    name && name.toUpperCase().includes("UNASSIGN")
+      ? "unassigned from"
+      : "assigned to";
+
+  // --- New: pull order + appointment + address + service details ---
+
+  let orderLabel = orderId || "unknown";
+  let orderNumber = null;
+  let orderTitle = null;
+  let orderStatusUrl = null;
+  let customerName = "unknown";
+  let serviceSummary = "unknown";
+  let propertyAddress = "unknown";
+  let mapsUrl = null;
+  let appointmentDate = "unknown";
+  let appointmentTime = "unknown";
+
+  if (orderId) {
+    const order = await fetchOrder(orderId);
+    if (order) {
+      orderNumber = order.number || null;
+      orderTitle = order.title || order.identifier || orderId;
+
+      orderStatusUrl =
+        order.status_url ||
+        order.invoice_url ||
+        order.payment_url ||
+        `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
+
+      orderLabel =
+        (orderNumber && `Order #${orderNumber}`) ||
+        orderTitle ||
+        orderId;
+
+      if (order.customer && order.customer.name) {
+        customerName = order.customer.name;
+      }
+
+      // Address
+      if (
+        order.listing &&
+        order.listing.address &&
+        order.listing.address.full_address
+      ) {
+        propertyAddress = order.listing.address.full_address;
+      } else if (order.address && order.address.full_address) {
+        propertyAddress = order.address.full_address;
+      }
+
+      if (propertyAddress && propertyAddress !== "unknown") {
+        mapsUrl = buildGoogleMapsUrl(propertyAddress);
+      }
+
+      // Service summary from items
+      const items = order.items || order.order_items || [];
+      if (Array.isArray(items) && items.length > 0) {
+        const names = items
+          .map((item) => item.name || item.product_name || item.title)
+          .filter(Boolean);
+
+        if (names.length === 1) {
+          serviceSummary = names[0];
+        } else if (names.length > 1) {
+          const firstFew = names.slice(0, 3).join(", ");
+          serviceSummary =
+            names.length > 3
+              ? `${firstFew} (+${names.length - 3} more)`
+              : firstFew;
+        }
+      }
+
+      // Appointment date/time – try to match appointmentId, else fall back to first
+      let appt = null;
+      if (Array.isArray(order.appointments) && order.appointments.length > 0) {
+        if (appointmentId) {
+          appt =
+            order.appointments.find((a) => a.id === appointmentId) ||
+            order.appointments[0];
+        } else {
+          appt = order.appointments[0];
+        }
+      }
+
+      if (appt) {
+        const appointmentRaw =
+          appt.start_at || appt.scheduled_at || appt.date || null;
+
+        if (appointmentRaw && typeof appointmentRaw === "string") {
+          const formatted = formatToEastern(appointmentRaw);
+          appointmentDate = formatted.date;
+          appointmentTime = formatted.time;
+        }
+      }
+    }
+  } else {
+    // Fallback: if Aryeo sends appointment fields directly on the resource
+    const appointmentRaw =
+      resource?.start_at || resource?.scheduled_at || resource?.date || null;
+    if (appointmentRaw && typeof appointmentRaw === "string") {
+      const formatted = formatToEastern(appointmentRaw);
+      appointmentDate = formatted.date;
+      appointmentTime = formatted.time;
+    }
+
+    if (resource?.address?.full_address) {
+      propertyAddress = resource.address.full_address;
+      mapsUrl = buildGoogleMapsUrl(propertyAddress);
+    }
+  }
+
+  // When the change was recorded (this is from Aryeo, not manual)
   const changeWhen = formatToEastern(occurred_at);
 
-  const direction = name && name.toUpperCase().includes("UNASSIGN")
-    ? "unassigned from"
-    : "assigned to";
+  // --- Build Discord message ---
 
   let lines = [];
-  lines.push("👥 **Photographer Assignment Updated**");
+  lines.push("👥 Photographer Assignment Updated");
   lines.push("");
+
+  // Order with link
+  if (orderStatusUrl && orderLabel !== "unknown") {
+    lines.push(`• Order: [${orderLabel}](${orderStatusUrl})`);
+  } else if (orderLabel !== "unknown") {
+    lines.push(`• Order: \`${orderLabel}\``);
+  }
+
+  // Client
+  if (customerName !== "unknown") {
+    lines.push(`• Client: \`${customerName}\``);
+  }
+
+  // Service
+  if (serviceSummary !== "unknown") {
+    lines.push(`• Service: \`${serviceSummary}\``);
+  }
+
+  // Appointment block
+  if (
+    appointmentDate !== "unknown" ||
+    appointmentTime !== "unknown" ||
+    propertyAddress !== "unknown"
+  ) {
+    lines.push("");
+    lines.push("**Appointment**");
+    if (appointmentDate !== "unknown") {
+      lines.push(`• Date: \`${appointmentDate}\``);
+    }
+    if (appointmentTime !== "unknown") {
+      lines.push(`• Time: \`${appointmentTime}\``);
+    }
+    if (propertyAddress !== "unknown") {
+      lines.push(`• Location: \`${propertyAddress}\``);
+    }
+    if (mapsUrl) {
+      lines.push(`• Map: ${mapsUrl}`);
+    }
+  }
+
+  // Shooter line
   if (shooterNames.length > 0) {
-    const label =
+    const shootersLabel =
       shooterNames.length === 1
         ? shooterNames[0]
         : shooterNames.join(", ");
-    lines.push(`• Photographer(s) ${direction} appointment: \`${label}\``);
+    lines.push("");
+    lines.push(
+      `• Photographer(s) ${direction} appointment: \`${shootersLabel}\``
+    );
   } else {
+    lines.push("");
     lines.push("• Photographer(s) changed (names not parsed).");
   }
-  lines.push(`• Updated at: \`${changeWhen.date} – ${changeWhen.time}\``);
 
+  // Change time
+  lines.push(
+    `• Change recorded at: \`${changeWhen.date} – ${changeWhen.time}\``
+  );
+
+  // Mentions at the end
   if (shooterMentions.length > 0) {
     lines.push("");
     lines.push(shooterMentions.join(" "));
   }
 
   const content = lines.join("\n");
+
   await sendToDiscord(
     BOOKINGS_WEBHOOK_URL,
     { content },
