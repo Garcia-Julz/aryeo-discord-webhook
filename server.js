@@ -1196,12 +1196,55 @@ cron.schedule(
 
 app.get("/test-morning-briefing", async (req, res) => {
   try {
-    console.log("🧪 Manually triggering morning briefing via /test-morning-briefing");
-    await sendMorningBriefing();
-    res.send("Morning briefing sent to Bookings Discord (if webhook is configured).");
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+
+    // Format for Aryeo API: YYYY-MM-DD
+    const today = `${year}-${month}-${day}`;
+
+    // Query all appointments for today
+    const url = `https://api.aryeo.com/v1/appointments?filter[date]=${today}`;
+
+    console.log("🔍 Fetching today's appointments:", url);
+
+    const resp = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${ARYEO_API_KEY}`,
+      },
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error("❌ Failed to fetch appointments:", text);
+      return res.status(500).send("Failed to fetch appointments");
+    }
+
+    const json = await resp.json();
+    const appointments = json.data || [];
+
+    const count = appointments.length;
+
+    const formattedDate = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+    }).format(now);
+
+    const message =
+      `📅 **Daily Schedule – ${formattedDate}**\n\n` +
+      `• **Total Appointments Today:** ${count}`;
+
+    // Send to Discord
+    await sendToDiscord(BOOKINGS_WEBHOOK_URL, { content: message }, "DAILY-TEST");
+
+    res.send(`Sent test briefing. Count = ${count}`);
   } catch (err) {
     console.error("💥 Error in /test-morning-briefing:", err);
-    res.status(500).send("Error sending morning briefing.");
+    res.status(500).send("Server error.");
   }
 });
 
