@@ -6,20 +6,20 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --- ENV VARS ---
-const ARYEO_WEBHOOK_SECRET = process.env.ARYEO_WEBHOOK_SECRET; // not used in test mode
+const ARYEO_WEBHOOK_SECRET = process.env.ARYEO_WEBHOOK_SECRET; // not used in TEST mode
 const ARYEO_API_KEY = process.env.ARYEO_API_KEY;
 
 const DRONE_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_DRONE;
 const QUICKBOOKS_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_QUICKBOOKS;
-
 const DRONE_MENTION = process.env.DRONE_MENTION || "@DronePilot";
 
+console.log("Boot: ARYEO_WEBHOOK_SECRET present?", !!ARYEO_WEBHOOK_SECRET);
 console.log("Boot: ARYEO_API_KEY present?", !!ARYEO_API_KEY);
 console.log("Boot: DRONE_WEBHOOK_URL present?", !!DRONE_WEBHOOK_URL);
 console.log("Boot: QUICKBOOKS_WEBHOOK_URL present?", !!QUICKBOOKS_WEBHOOK_URL);
 console.log("Boot: DRONE_MENTION =", DRONE_MENTION);
 
-// --- BODY PARSER (keeps rawBody for future real signature checks) ---
+// --- BODY PARSER (keep rawBody in case we later validate signatures) ---
 app.use(
   express.json({
     verify: (req, res, buf) => {
@@ -28,180 +28,327 @@ app.use(
   })
 );
 
-// --- SIGNATURE VERIFICATION (TEST MODE: always true for now) ---
+// --- SIGNATURE VERIFICATION (TEST MODE: always allow) ---
 function verifyAryeoSignature(rawBody, signatureHeader) {
   console.warn("⚠️ Skipping signature verification (TEST MODE).");
   return true;
-
-  // When you're ready for real HMAC verification, swap in logic like:
-  //
-  // const crypto = require("crypto");
-  // if (!signatureHeader || !ARYEO_WEBHOOK_SECRET) return false;
-  // const expected = crypto
-  //   .createHmac("sha256", ARYEO_WEBHOOK_SECRET)
-  //   .update(rawBody, "utf8")
-  //   .digest("hex");
-  // return crypto.timingSafeEqual(
-  //   Buffer.from(expected, "hex"),
-  //   Buffer.from(signatureHeader, "hex")
-  // );
 }
 
 // ---------------------------------------------------------
 // SHARED HELPERS
 // ---------------------------------------------------------
 
-// DRONE detection config based on your product list
-const DRONE_PRODUCT_NAMES = [
-  "pro package",
-  "plus package",
-  "property listing video",
-  "drone video",
-  "drone photos",
-  "zillow showcase tour package + drone",
-  "zillow showcase + 40 photos + drone + 60-second video package",
-  "add drone photos?",
-  "community photos",
-];
-
-const DRONE_KEYWORDS = ["drone", "aerial"];
-
-// Generic Discord helper
-async function sendToDiscord(webhookUrl, content) {
+async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
   if (!webhookUrl) {
-    console.error("❌ Missing Discord webhook URL for this notification");
+    console.error(`❌ Missing Discord webhook URL for [${contextLabel || "notification"}]`);
     return;
   }
 
+  // Allow payload to be string (content) or object ({content, embeds, ...})
+  const body =
+    typeof payload === "string"
+      ? { content: payload }
+      : payload;
+
   try {
+    console.log(`➡️ Sending to Discord [${contextLabel}]…`);
     const resp = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify(body),
     });
-    console.log("📨 Discord status:", resp.status);
+    console.log(`📨 Discord status [${contextLabel}]:`, resp.status);
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error("❌ Discord error response:", text);
+    }
   } catch (err) {
-    console.error("❌ Error sending to Discord:", err);
+    console.error(`❌ Error sending to Discord [${contextLabel}]:`, err);
   }
 }
 
-// Fetch order details from Aryeo so we can inspect items
+function buildGoogleMapsUrl(addressString) {
+  if (!addressString) return null;
+  const encoded = encodeURIComponent(addressString);
+  return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
+}
+
+// Very simple drone-detection helper.
+// Adjust keywords if your product names change.
+function orderRequiresDrone(order) {
+  const droneKeywords = [
+    "drone",
+    "aerial",
+    "plus package",
+    "pro package",
+    "property listing video", // you said this uses drone when permitted
+  ];
+
+  const items =
+    order.items ||
+    order.order_items ||
+    [];
+
+  if (!Array.isArray(items) || items.length === 0) {
+    console.log("ℹ️ No order items found when checking for drone.");
+    return null; // unknown
+  }
+
+  const itemsLower = items.map((item) => {
+    const name =
+      item.name ||
+      item.product_name ||
+      item.title ||
+      "";
+    return name.toLowerCase();
+  });
+
+  const hit = droneKeywords.find((kw) =>
+    itemsLower.some((name) => name.includes(kw))
+  );
+
+  if (hit) {
+    console.log("🚁 Drone detected via keyword:", hit);
+    return true;
+  }
+
+  console.log("ℹ️ No drone keywords detected in order items.");
+  return false;
+}
+
+// Fetch order details from Aryeo.
+// NOTE: field names may need tiny tweaks based on your real response.
 async function fetchOrder(orderId) {
   if (!ARYEO_API_KEY) {
-    console.error("❌ ARYEO_API_KEY missing, cannot fetch order");
+    console.log("❌ ARYEO_API_KEY missing, cannot fetch order.");
     return null;
   }
 
+  const url = `https://api.aryeo.com/v1/orders/${orderId}?include=appointments,customer,address,items`;
+
   try {
-    const url = `https://api.aryeo.com/v1/orders/${orderId}?include=items`;
+    console.log("🔍 Fetching order from Aryeo:", url);
     const resp = await fetch(url, {
-      method: "GET",
       headers: {
-        Authorization: `Bearer ${ARYEO_API_KEY}`,
         Accept: "application/json",
+        Authorization: `Bearer ${ARYEO_API_KEY}`,
       },
     });
 
     if (!resp.ok) {
       const text = await resp.text();
-      console.error(
-        "❌ Aryeo order fetch failed:",
-        resp.status,
-        resp.statusText,
-        text
-      );
+      console.error("❌ Aryeo order fetch failed:", resp.status, text);
       return null;
     }
 
     const json = await resp.json();
-    return json.data || null;
+    const order = json.data || json.order || json;
+    console.log("✅ Aryeo order fetch success. Sample:", {
+      id: order.id,
+      number: order.number,
+      title: order.title,
+      hasAddress: !!order.address,
+      hasCustomer: !!order.customer,
+      appointmentsType: Array.isArray(order.appointments)
+        ? `array(${order.appointments.length})`
+        : typeof order.appointments,
+    });
+
+    return order;
   } catch (err) {
-    console.error("❌ Error calling Aryeo API:", err);
+    console.error("💥 Error fetching order from Aryeo:", err);
     return null;
   }
-}
-
-// Decide whether an order includes a drone product
-function orderRequiresDrone(order) {
-  if (!order?.items) return false;
-
-  for (const item of order.items) {
-    const label = (item.title || item.name || "").toLowerCase();
-
-    if (!label) continue;
-
-    // match against known product names
-    if (DRONE_PRODUCT_NAMES.some((name) => label.includes(name))) {
-      return true;
-    }
-
-    // or any “drone / aerial” keyword
-    if (DRONE_KEYWORDS.some((kw) => label.includes(kw))) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 // ---------------------------------------------------------
 // EVENT HANDLERS
 // ---------------------------------------------------------
 
-// ORDER_CREATED → send to DRONE channel (always sends; marks drone yes/no/unknown)
+// ORDER_CREATED → drone channel, with order & appointment info
 async function handleOrderCreated(activity) {
-  const { occurred_at, resource } = activity;
+  const { occurred_at, resource } = activity || {};
   const orderId = resource?.id;
 
+  if (!orderId) {
+    console.warn("ORDER_CREATED event missing resource.id");
+    return;
+  }
+
   let orderTitle = orderId;
+  let orderStatus = "unknown";
+  let orderNumber = null;
+  let orderStatusUrl = null;
+
+  let appointmentDate = "unknown";
+  let appointmentTime = "unknown";
+  let appointmentRaw = null;
+
+  let propertyAddress = "unknown";
+  let mapsUrl = null;
+
+  let customerName = "unknown";
   let requiresDrone = null; // null = unknown, true/false = known
 
-  if (!orderId) {
-    console.log("ℹ️ ORDER_CREATED with no orderId in resource");
-  } else if (!ARYEO_API_KEY) {
-    console.log("❌ ARYEO_API_KEY missing, cannot check for drone products.");
-  } else {
-    // Try to fetch from Aryeo and detect drone
-    const order = await fetchOrder(orderId);
-    if (order) {
-      orderTitle = order.title || order.identifier || orderId;
-      requiresDrone = orderRequiresDrone(order);
-    } else {
-      console.log("ℹ️ No order data returned from Aryeo, cannot determine drone.");
+  const order = await fetchOrder(orderId);
+
+  if (order) {
+    orderTitle = order.title || order.identifier || orderId;
+    orderStatus = order.status || "unknown";
+    orderNumber = order.number || null;
+    orderStatusUrl = order.status_url || order.payment_url || null;
+
+    // Customer / client name
+    if (order.customer && order.customer.name) {
+      customerName = order.customer.name;
     }
+
+    // Address – try unparsed_address first, then build from pieces
+    if (order.address) {
+      const addr = order.address;
+      propertyAddress =
+        addr.unparsed_address ||
+        [
+          addr.street_number,
+          addr.street_name,
+          addr.city,
+          addr.state_or_province || addr.state,
+          addr.postal_code,
+        ]
+          .filter(Boolean)
+          .join(", ") ||
+        "unknown";
+
+      mapsUrl = buildGoogleMapsUrl(propertyAddress);
+    }
+
+    // Appointment – take first appointment if present
+    if (Array.isArray(order.appointments) && order.appointments.length > 0) {
+      const appt = order.appointments[0];
+      appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+
+      if (appointmentRaw && typeof appointmentRaw === "string") {
+        const [datePart, timePart] = appointmentRaw.split("T");
+        appointmentDate = datePart || appointmentRaw;
+        appointmentTime = (timePart || "").replace("Z", "") || appointmentRaw;
+      }
+    }
+
+    // Drone detection
+    requiresDrone = orderRequiresDrone(order);
   }
 
   let droneFlagLabel = "unknown";
-
   if (requiresDrone === true) droneFlagLabel = "yes";
   if (requiresDrone === false) droneFlagLabel = "no";
 
-  let message =
-    `🆕 **New Order Created**\n` +
-    `• Order: \`${orderTitle}\`\n` +
-    `• Order ID: \`${orderId}\`\n` +
-    `• Time (UTC): ${occurred_at}\n` +
-    `• Drone Required: \`${droneFlagLabel}\``;
+  // Build a rich Discord message (plain content + nice formatting)
+  let lines = [];
 
   if (requiresDrone === true) {
-    message += `\n\n🚁 **Drone Package Detected** — ${DRONE_MENTION || "@DronePilot"}, please check FAA airspace for this location.`;
+    lines.push("🚁 **New Drone Flight Check Needed**");
+  } else {
+    lines.push("🆕 **New Order Created**");
   }
 
-  await sendToDiscord(DRONE_WEBHOOK_URL, message, "DRONE");
+  lines.push("");
+  lines.push("**Order**");
+  lines.push(`• ID: \`${orderId}\``);
+
+  // Order label with hyperlink if we have status_url
+  const label =
+    (orderNumber && `Order #${orderNumber}`) ||
+    orderTitle ||
+    orderId;
+
+  if (orderStatusUrl) {
+    lines.push(`• Link: [${label}](${orderStatusUrl})`);
+  } else {
+    lines.push(`• Title: \`${label}\``);
+  }
+
+  if (customerName !== "unknown") {
+    lines.push(`• Client: \`${customerName}\``);
+  }
+
+  lines.push(`• Status: \`${orderStatus}\``);
+  lines.push(`• Created (UTC): ${occurred_at}`);
+  lines.push(`• Drone Required (auto): \`${droneFlagLabel}\``);
+
+  lines.push("");
+  lines.push("**Appointment**");
+  lines.push(`• Date: \`${appointmentDate}\``);
+  lines.push(`• Time (UTC): \`${appointmentTime}\``);
+  lines.push(`• Location: \`${propertyAddress}\``);
+
+  if (mapsUrl) {
+    lines.push(`• Map: ${mapsUrl}`);
+  }
+
+  lines.push("");
+  lines.push("**Action for Drone Team**");
+  lines.push("• Check this location in Air Control.");
+  lines.push("• Confirm: Allowed / Restricted / Permit Required.");
+
+  if (requiresDrone === true && DRONE_MENTION) {
+    lines.push("");
+    lines.push(DRONE_MENTION);
+  }
+
+  const content = lines.join("\n");
+
+  await sendToDiscord(DRONE_WEBHOOK_URL, { content }, "DRONE-ORDER_CREATED");
 }
 
-// ORDER_PAYMENT_RECEIVED → used for QuickBooks / payment notifications
+// ORDER_PAYMENT_RECEIVED → QuickBooks channel
 async function handleOrderPaymentReceived(activity) {
-  const { occurred_at, resource } = activity;
+  const { occurred_at, resource } = activity || {};
   const orderId = resource?.id;
 
-  // You can enrich this later by fetching order details too if you want
-  const message =
-    `💳 **Payment Received**\n` +
-    `• Order ID: \`${orderId}\`\n` +
-    `• Time (UTC): ${occurred_at}`;
+  if (!orderId) {
+    console.warn("ORDER_PAYMENT_RECEIVED event missing resource.id");
+    return;
+  }
 
-  await sendToDiscord(QUICKBOOKS_WEBHOOK_URL, message);
+  let orderTitle = orderId;
+  let orderNumber = null;
+  let orderStatusUrl = null;
+  let customerName = "unknown";
+
+  const order = await fetchOrder(orderId);
+
+  if (order) {
+    orderTitle = order.title || order.identifier || orderId;
+    orderNumber = order.number || null;
+    orderStatusUrl = order.status_url || order.invoice_url || order.payment_url || null;
+
+    if (order.customer && order.customer.name) {
+      customerName = order.customer.name;
+    }
+  }
+
+  const label =
+    (orderNumber && `Order #${orderNumber}`) ||
+    orderTitle ||
+    orderId;
+
+  let lines = [];
+  lines.push("💳 **Payment Received**");
+  lines.push("");
+  if (orderStatusUrl) {
+    lines.push(`• Order: [${label}](${orderStatusUrl})`);
+  } else {
+    lines.push(`• Order: \`${label}\``);
+  }
+  lines.push(`• Order ID: \`${orderId}\``);
+  if (customerName !== "unknown") {
+    lines.push(`• Client: \`${customerName}\``);
+  }
+  lines.push(`• Time (UTC): ${occurred_at}`);
+
+  const content = lines.join("\n");
+
+  await sendToDiscord(QUICKBOOKS_WEBHOOK_URL, { content }, "QB-PAYMENT_RECEIVED");
 }
 
 // ---------------------------------------------------------
@@ -211,10 +358,6 @@ async function handleOrderPaymentReceived(activity) {
 const activityHandlers = {
   ORDER_CREATED: handleOrderCreated,
   ORDER_PAYMENT_RECEIVED: handleOrderPaymentReceived,
-  // In the future:
-  // LISTING_DELIVERED: handleListingDelivered,
-  // ORDER_CANCELLED: handleOrderCancelled,
-  // etc...
 };
 
 // ---------------------------------------------------------
@@ -249,7 +392,33 @@ app.post("/aryeo-webhook", async (req, res) => {
   }
 });
 
-// Simple root route for sanity checks
+// ---------------------------------------------------------
+// SIMPLE TEST ROUTES (no Aryeo involved)
+// ---------------------------------------------------------
+
+app.get("/test-drone", async (req, res) => {
+  await sendToDiscord(
+    DRONE_WEBHOOK_URL,
+    {
+      content: "🧪 Test message to **Drone** channel from `/test-drone`",
+    },
+    "DRONE-TEST"
+  );
+  res.send("Sent test message to Drone Discord webhook (if configured).");
+});
+
+app.get("/test-quickbooks", async (req, res) => {
+  await sendToDiscord(
+    QUICKBOOKS_WEBHOOK_URL,
+    {
+      content: "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`",
+    },
+    "QB-TEST"
+  );
+  res.send("Sent test message to QuickBooks Discord webhook (if configured).");
+});
+
+// Root sanity route
 app.get("/", (req, res) => {
   res.send("Aryeo → Discord webhook is running.");
 });
