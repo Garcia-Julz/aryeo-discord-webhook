@@ -453,25 +453,40 @@ async function handleOrderPaymentReceived(activity) {
     orderTitle ||
     orderId;
 
+  const when = formatToEastern(occurred_at);
+
+  // 🔹 NEW: find latest payment & get amount
+  let amountLabel = "unknown";
+
+  if (order && Array.isArray(order.payments) && order.payments.length > 0) {
+    const lastPayment = order.payments[order.payments.length - 1];
+
+    // Try a few likely fields – adjust once you see real data in logs
+    amountLabel =
+      lastPayment.amount_formatted ||
+      lastPayment.total_price_formatted ||
+      lastPayment.amount ||
+      lastPayment.total_price ||
+      "unknown";
+  }
+
   let lines = [];
   lines.push("💳 **Payment Received**");
   lines.push("");
-
-  lines.push("**Order**");
   if (orderStatusUrl) {
     lines.push(`• Order: [${label}](${orderStatusUrl})`);
   } else {
     lines.push(`• Order: \`${label}\``);
   }
-
+  lines.push(`• Order ID: \`${orderId}\``);
   if (customerName !== "unknown") {
     lines.push(`• Client: \`${customerName}\``);
   }
 
   lines.push("");
   lines.push("**Payment**");
-  lines.push(`• Amount: \`${amountPaid}\``);
-  lines.push(`• Paid: \`${paidDate}\` at \`${paidTime}\``);
+  lines.push(`• Amount: \`${amountLabel}\``);
+  lines.push(`• Paid: \`${when.date} at ${when.time}\``);
 
   const content = lines.join("\n");
 
