@@ -357,12 +357,16 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     const startRaw = appt.start_at || appt.scheduled_at || appt.date || null;
     const when = startRaw ? formatToEastern(startRaw) : { date: "unknown", time: "unknown" };
 
-    // Address (from order.listing.address or order.address)
+    // Address (from order.listing.address or order.address, or appt.address)
     let propertyAddress = "Unknown address";
+
     if (order.listing && order.listing.address && order.listing.address.full_address) {
       propertyAddress = order.listing.address.full_address;
     } else if (order.address && order.address.full_address) {
       propertyAddress = order.address.full_address;
+    } else if (appt.address && appt.address.full_address) {
+      // fallback to appointment address if present
+      propertyAddress = appt.address.full_address;
     }
 
     const mapsUrl = propertyAddress !== "Unknown address"
