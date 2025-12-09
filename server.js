@@ -6,25 +6,32 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // --- ENV VARS ---
-const ARYEO_WEBHOOK_SECRET = process.env.ARYEO_WEBHOOK_SECRET; // not used in TEST mode
+// For real HMAC verification later if you want:
+const ARYEO_WEBHOOK_SECRET = process.env.ARYEO_WEBHOOK_SECRET;
+
+// API key used to call Aryeo REST API
 const ARYEO_API_KEY = process.env.ARYEO_API_KEY;
 
+// Discord webhooks
 const DRONE_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_DRONE;
 const QUICKBOOKS_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_QUICKBOOKS;
+const BOOKINGS_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_BOOKINGS;
+
+// Generic role mention if no specific shooter is found
 const DRONE_MENTION = process.env.DRONE_MENTION || "@DronePilot";
 
 // Map Aryeo user names -> Discord mentions
-// Adjust the keys ("Julian Garcia", "Que McKenzie") to match
-// exactly how Aryeo returns their names in appointments.users.
+// Make sure these match *exactly* how Aryeo returns the name.
 const PHOTOGRAPHER_DISCORD_MAP = {
   "Julian Garcia": "<@294642333352198148>",
-  "Que McKenzie": "<@242693007453847552>",
+  "Que Mckenzie": "<@242693007453847552>",
 };
 
 console.log("Boot: ARYEO_WEBHOOK_SECRET present?", !!ARYEO_WEBHOOK_SECRET);
 console.log("Boot: ARYEO_API_KEY present?", !!ARYEO_API_KEY);
 console.log("Boot: DRONE_WEBHOOK_URL present?", !!DRONE_WEBHOOK_URL);
 console.log("Boot: QUICKBOOKS_WEBHOOK_URL present?", !!QUICKBOOKS_WEBHOOK_URL);
+console.log("Boot: BOOKINGS_WEBHOOK_URL present?", !!BOOKINGS_WEBHOOK_URL);
 console.log("Boot: DRONE_MENTION =", DRONE_MENTION);
 
 // --- BODY PARSER (keep rawBody in case we later validate signatures) ---
@@ -71,28 +78,23 @@ function formatToEastern(isoString) {
   });
 
   return {
-    date: dateFormatter.format(d),         // e.g. "Feb 01, 2025"
-    time: timeFormatter.format(d) + " ET", // e.g. "10:30 AM ET"
+    date: dateFormatter.format(d), // e.g. "Dec 04, 2025"
+    time: timeFormatter.format(d) + " ET", // e.g. "9:30 AM ET"
   };
 }
 
 async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
   if (!webhookUrl) {
-    console.error(`❌ Missing Discord webhook URL for [${contextLabel || "notification"}]`);
+    console.error(
+      `❌ Missing Discord webhook URL for [${contextLabel || "notification"}]`
+    );
     return;
   }
 
-  // Allow payload to be string (content) or object ({content, embeds, ...})
-  const baseBody =
+  const body =
     typeof payload === "string"
       ? { content: payload }
       : payload;
-
-  // Add flags: 4 to suppress embeds (Google Maps preview, etc.)
-  const body = {
-    flags: baseBody.flags ?? 4,  // if you ever pass a custom flags value, we won't override it
-    ...baseBody,
-  };
 
   try {
     console.log(`➡️ Sending to Discord [${contextLabel}]…`);
@@ -164,8 +166,6 @@ async function fetchOrder(orderId) {
     return null;
   }
 
-  // NOTE: `address` is NOT allowed in include list.
-  // We include listing and then use listing.address.
   const url =
     `https://api.aryeo.com/v1/orders/${orderId}` +
     `?include=items,listing,customer,appointments,appointments.users`;
@@ -191,14 +191,12 @@ async function fetchOrder(orderId) {
       id: order.id,
       number: order.number,
       title: order.title,
-      hasListing: !!order.listing,
       hasCustomer: !!order.customer,
       appointmentsType: Array.isArray(order.appointments)
         ? `array(${order.appointments.length})`
         : typeof order.appointments,
     });
 
-    // Helpful once to see the appointment structure:
     if (Array.isArray(order.appointments) && order.appointments.length > 0) {
       console.log(
         "📝 First appointment users:",
@@ -256,39 +254,15 @@ async function handleOrderCreated(activity) {
       customerName = order.customer.name;
     }
 
-    // Address – prefer listing.address, fallback to order.address if it exists
-    if (order.listing && order.listing.address) {
-      const addr = order.listing.address;
-      propertyAddress =
-        addr.unparsed_address ||
-        [
-          addr.address_line_1,
-          addr.address_line_2,
-          addr.city,
-          addr.state_or_province || addr.state,
-          addr.postal_code,
-        ]
-          .filter(Boolean)
-          .join(", ") ||
-        "unknown";
+    // Prefer listing.address if present
+    if (order.listing && order.listing.address && order.listing.address.full_address) {
+      propertyAddress = order.listing.address.full_address;
+    } else if (order.address && order.address.full_address) {
+      // fallback if you ever add "address" as allowed include
+      propertyAddress = order.address.full_address;
+    }
 
-      mapsUrl = buildGoogleMapsUrl(propertyAddress);
-    } else if (order.address) {
-      // Fallback in case order.address is actually present for you
-      const addr = order.address;
-      propertyAddress =
-        addr.unparsed_address ||
-        [
-          addr.street_number,
-          addr.street_name,
-          addr.city,
-          addr.state_or_province || addr.state,
-          addr.postal_code,
-        ]
-          .filter(Boolean)
-          .join(", ") ||
-        "unknown";
-
+    if (propertyAddress && propertyAddress !== "unknown") {
       mapsUrl = buildGoogleMapsUrl(propertyAddress);
     }
 
@@ -347,7 +321,9 @@ async function handleOrderCreated(activity) {
 
   // If we’re confident it’s NOT a drone job, skip notifying this channel
   if (requiresDrone === false) {
-    console.log("ℹ️ Order does not appear to include drone services; skipping drone notification.");
+    console.log(
+      "ℹ️ Order does not appear to include drone services; skipping drone notification."
+    );
     return;
   }
 
@@ -446,6 +422,8 @@ async function handleOrderPaymentReceived(activity) {
     orderTitle ||
     orderId;
 
+  const when = formatToEastern(occurred_at);
+
   let lines = [];
   lines.push("💳 **Payment Received**");
   lines.push("");
@@ -458,19 +436,291 @@ async function handleOrderPaymentReceived(activity) {
   if (customerName !== "unknown") {
     lines.push(`• Client: \`${customerName}\``);
   }
+  lines.push(`• Time: \`${when.date} – ${when.time}\``);
 
   const content = lines.join("\n");
 
-  await sendToDiscord(QUICKBOOKS_WEBHOOK_URL, { content }, "QB-PAYMENT_RECEIVED");
+  await sendToDiscord(
+    QUICKBOOKS_WEBHOOK_URL,
+    { content },
+    "QB-PAYMENT_RECEIVED"
+  );
+}
+
+// ❌ ORDER CANCELED → bookings channel
+async function handleOrderCanceled(activity) {
+  const { occurred_at, resource } = activity || {};
+  const orderId = resource?.id;
+
+  if (!orderId) {
+    console.warn("ORDER_CANCELED event missing resource.id");
+    return;
+  }
+
+  let orderTitle = orderId;
+  let orderNumber = null;
+  let customerName = "unknown";
+  let serviceSummary = "unknown";
+
+  const order = await fetchOrder(orderId);
+
+  if (order) {
+    orderTitle = order.title || order.identifier || orderId;
+    orderNumber = order.number || null;
+
+    if (order.customer && order.customer.name) {
+      customerName = order.customer.name;
+    }
+
+    const items = order.items || order.order_items || [];
+    if (Array.isArray(items) && items.length > 0) {
+      const names = items
+        .map((item) => item.name || item.product_name || item.title)
+        .filter(Boolean);
+
+      if (names.length === 1) {
+        serviceSummary = names[0];
+      } else if (names.length > 1) {
+        const firstFew = names.slice(0, 3).join(", ");
+        serviceSummary =
+          names.length > 3
+            ? `${firstFew} (+${names.length - 3} more)`
+            : firstFew;
+      }
+    }
+  }
+
+  const label =
+    (orderNumber && `Order #${orderNumber}`) ||
+    orderTitle ||
+    orderId;
+
+  const when = formatToEastern(occurred_at);
+  const reason =
+    activity.reason ||
+    (activity.metadata && activity.metadata.reason) ||
+    null;
+
+  let lines = [];
+  lines.push("❌ **Order Cancelled**");
+  lines.push("");
+  lines.push(`• Order: \`${label}\``);
+  if (customerName !== "unknown") {
+    lines.push(`• Client: \`${customerName}\``);
+  }
+  if (serviceSummary !== "unknown") {
+    lines.push(`• Service: \`${serviceSummary}\``);
+  }
+  lines.push(`• Cancelled at: \`${when.date} – ${when.time}\``);
+  if (reason) {
+    lines.push(`• Reason: \`${reason}\``);
+  }
+
+  const content = lines.join("\n");
+  await sendToDiscord(
+    BOOKINGS_WEBHOOK_URL,
+    { content },
+    "BOOKINGS-ORDER_CANCELED"
+  );
+}
+
+// 🔁 APPOINTMENT RESCHEDULED → bookings channel
+async function handleAppointmentRescheduled(activity) {
+  const { occurred_at, resource } = activity || {};
+
+  const appointmentId = resource?.id;
+  const orderId = resource?.order_id || resource?.order?.id;
+
+  let orderLabel = orderId || "unknown";
+  let customerName = "unknown";
+  let appointmentDate = "unknown";
+  let appointmentTime = "unknown";
+  let propertyAddress = "unknown";
+  let mapsUrl = null;
+
+  // If we can see an order_id, try to pull richer info from the order
+  if (orderId) {
+    const order = await fetchOrder(orderId);
+    if (order) {
+      const orderNumber = order.number || null;
+      const orderTitle = order.title || order.identifier || orderId;
+
+      orderLabel =
+        (orderNumber && `Order #${orderNumber}`) ||
+        orderTitle ||
+        orderId;
+
+      if (order.customer && order.customer.name) {
+        customerName = order.customer.name;
+      }
+
+      if (order.listing && order.listing.address && order.listing.address.full_address) {
+        propertyAddress = order.listing.address.full_address;
+      } else if (order.address && order.address.full_address) {
+        propertyAddress = order.address.full_address;
+      }
+
+      if (propertyAddress && propertyAddress !== "unknown") {
+        mapsUrl = buildGoogleMapsUrl(propertyAddress);
+      }
+
+      if (Array.isArray(order.appointments) && order.appointments.length > 0) {
+        const appt = order.appointments[0];
+        const appointmentRaw =
+          appt.start_at || appt.scheduled_at || appt.date || null;
+
+        if (appointmentRaw && typeof appointmentRaw === "string") {
+          const formatted = formatToEastern(appointmentRaw);
+          appointmentDate = formatted.date;
+          appointmentTime = formatted.time;
+        }
+      }
+    }
+  } else {
+    // Fallback: try to pull directly off the resource in case Aryeo sends an appointment object
+    const appointmentRaw =
+      resource?.start_at || resource?.scheduled_at || resource?.date || null;
+    if (appointmentRaw && typeof appointmentRaw === "string") {
+      const formatted = formatToEastern(appointmentRaw);
+      appointmentDate = formatted.date;
+      appointmentTime = formatted.time;
+    }
+  }
+
+  const changeWhen = formatToEastern(occurred_at);
+
+  let lines = [];
+  lines.push("🔁 **Appointment Rescheduled**");
+  lines.push("");
+  if (appointmentId) {
+    lines.push(`• Appointment ID: \`${appointmentId}\``);
+  }
+  if (orderLabel !== "unknown") {
+    lines.push(`• Order: \`${orderLabel}\``);
+  }
+  if (customerName !== "unknown") {
+    lines.push(`• Client: \`${customerName}\``);
+  }
+  lines.push("");
+  lines.push("**New Appointment Time**");
+  lines.push(`• Date: \`${appointmentDate}\``);
+  lines.push(`• Time: \`${appointmentTime}\``);
+  if (propertyAddress !== "unknown") {
+    lines.push(`• Location: \`${propertyAddress}\``);
+  }
+  if (mapsUrl) {
+    lines.push(`• Map: ${mapsUrl}`);
+  }
+  lines.push("");
+  lines.push(
+    `• Change recorded at: \`${changeWhen.date} – ${changeWhen.time}\``
+  );
+
+  const content = lines.join("\n");
+  await sendToDiscord(
+    BOOKINGS_WEBHOOK_URL,
+    { content },
+    "BOOKINGS-APPOINTMENT_RESCHEDULED"
+  );
+}
+
+// 👥 Photographer assignment change → bookings channel
+async function handlePhotographerAssignmentChanged(activity) {
+  const { occurred_at, resource, name } = activity || {};
+
+  const appointmentId = resource?.id || resource?.appointment_id;
+  const orderId = resource?.order_id || resource?.order?.id;
+
+  let shooterNames = [];
+  let shooterMentions = [];
+
+  if (resource?.user) {
+    const u = resource.user;
+    const userName =
+      u.name ||
+      [u.first_name, u.last_name].filter(Boolean).join(" ") ||
+      null;
+    if (userName) {
+      shooterNames.push(userName);
+      const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
+      if (mention) shooterMentions.push(mention);
+    }
+  } else if (Array.isArray(resource?.users)) {
+    resource.users.forEach((u) => {
+      const userName =
+        u.name ||
+        [u.first_name, u.last_name].filter(Boolean).join(" ") ||
+        null;
+      if (userName) {
+        shooterNames.push(userName);
+        const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
+        if (mention) shooterMentions.push(mention);
+      }
+    });
+  }
+
+  const changeWhen = formatToEastern(occurred_at);
+
+  const direction = name && name.toUpperCase().includes("UNASSIGN")
+    ? "unassigned from"
+    : "assigned to";
+
+  let lines = [];
+  lines.push("👥 **Photographer Assignment Updated**");
+  lines.push("");
+  if (appointmentId) {
+    lines.push(`• Appointment ID: \`${appointmentId}\``);
+  }
+  if (orderId) {
+    lines.push(`• Order ID: \`${orderId}\``);
+  }
+  if (shooterNames.length > 0) {
+    const label =
+      shooterNames.length === 1
+        ? shooterNames[0]
+        : shooterNames.join(", ");
+    lines.push(`• Photographer(s) ${direction} appointment: \`${label}\``);
+  } else {
+    lines.push("• Photographer(s) changed (names not parsed).");
+  }
+  lines.push(`• Change recorded at: \`${changeWhen.date} – ${changeWhen.time}\``);
+
+  if (shooterMentions.length > 0) {
+    lines.push("");
+    lines.push(shooterMentions.join(" "));
+  }
+
+  const content = lines.join("\n");
+  await sendToDiscord(
+    BOOKINGS_WEBHOOK_URL,
+    { content },
+    "BOOKINGS-PHOTOGRAPHER_ASSIGNMENT"
+  );
 }
 
 // ---------------------------------------------------------
 // ACTIVITY NAME → HANDLER MAP
 // ---------------------------------------------------------
+//
+// ⚠️ Names here are our best guess based on Aryeo’s conventions.
+// When you see real activity.name values coming through from Aryeo,
+// update these keys to match exactly.
 
 const activityHandlers = {
   ORDER_CREATED: handleOrderCreated,
   ORDER_PAYMENT_RECEIVED: handleOrderPaymentReceived,
+
+  // Order cancelled (Aryeo might use either spelling)
+  ORDER_CANCELED: handleOrderCanceled,
+  ORDER_CANCELLED: handleOrderCanceled,
+
+  // Appointment rescheduled
+  APPOINTMENT_RESCHEDULED: handleAppointmentRescheduled,
+
+  // Photographer assignment changes (adjust once you see real names)
+  APPOINTMENT_USER_ASSIGNED: handlePhotographerAssignmentChanged,
+  APPOINTMENT_USER_UNASSIGNED: handlePhotographerAssignmentChanged,
+  APPOINTMENT_USERS_CHANGED: handlePhotographerAssignmentChanged,
 };
 
 // ---------------------------------------------------------
@@ -529,6 +779,17 @@ app.get("/test-quickbooks", async (req, res) => {
     "QB-TEST"
   );
   res.send("Sent test message to QuickBooks Discord webhook (if configured).");
+});
+
+app.get("/test-bookings", async (req, res) => {
+  await sendToDiscord(
+    BOOKINGS_WEBHOOK_URL,
+    {
+      content: "🧪 Test message to **Bookings** channel from `/test-bookings`",
+    },
+    "BOOKINGS-TEST"
+  );
+  res.send("Sent test message to Bookings Discord webhook (if configured).");
 });
 
 // Root sanity route
