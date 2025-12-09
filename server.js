@@ -168,7 +168,7 @@ async function fetchOrder(orderId) {
 
   const url =
     `https://api.aryeo.com/v1/orders/${orderId}` +
-    `?include=items,listing,customer,appointments,appointments.users`;
+    `?include=items,listing,customer,appointments,appointments.users,payments`;
 
   try {
     console.log("🔍 Fetching order from Aryeo:", url);
@@ -389,7 +389,7 @@ async function handleOrderCreated(activity) {
   await sendToDiscord(DRONE_WEBHOOK_URL, { content }, "DRONE-ORDER_CREATED");
 }
 
-// ORDER_PAYMENT_RECEIVED → QuickBooks channel
+// ORDER_PAYMENT_RECEIVED → QuickBooks channel (billing)
 async function handleOrderPaymentReceived(activity) {
   const { occurred_at, resource } = activity || {};
   const orderId = resource?.id;
@@ -403,6 +403,9 @@ async function handleOrderPaymentReceived(activity) {
   let orderNumber = null;
   let orderStatusUrl = null;
   let customerName = "unknown";
+  let amountPaid = "unknown";
+  let paidDate = "unknown";
+  let paidTime = "unknown";
 
   const order = await fetchOrder(orderId);
 
@@ -415,6 +418,34 @@ async function handleOrderPaymentReceived(activity) {
     if (order.customer && order.customer.name) {
       customerName = order.customer.name;
     }
+
+    // Try to get the most recent payment for amount
+    if (Array.isArray(order.payments) && order.payments.length > 0) {
+      const p = order.payments[order.payments.length - 1];
+
+      // Try a few common fields for a "nice" amount label
+      let label = null;
+      if (p.total_price_formatted) {
+        label = p.total_price_formatted; // e.g. "$250.00"
+      } else if (typeof p.total === "number") {
+        label = `$${p.total.toFixed(2)}`;
+      } else if (p.amount && typeof p.amount === "number") {
+        label = `$${p.amount.toFixed(2)}`;
+      } else if (p.amount && typeof p.amount === "string") {
+        label = p.amount;
+      }
+
+      if (label) {
+        amountPaid = label;
+      }
+    }
+  }
+
+  // Use occurred_at as "payment happened" time, formatted to Eastern
+  if (occurred_at) {
+    const formatted = formatToEastern(occurred_at);
+    paidDate = formatted.date;
+    paidTime = formatted.time;
   }
 
   const label =
@@ -422,21 +453,25 @@ async function handleOrderPaymentReceived(activity) {
     orderTitle ||
     orderId;
 
-  const when = formatToEastern(occurred_at);
-
   let lines = [];
   lines.push("💳 **Payment Received**");
   lines.push("");
+
+  lines.push("**Order**");
   if (orderStatusUrl) {
     lines.push(`• Order: [${label}](${orderStatusUrl})`);
   } else {
     lines.push(`• Order: \`${label}\``);
   }
-  lines.push(`• Order ID: \`${orderId}\``);
+
   if (customerName !== "unknown") {
     lines.push(`• Client: \`${customerName}\``);
   }
-  lines.push(`• Time: \`${when.date} – ${when.time}\``);
+
+  lines.push("");
+  lines.push("**Payment**");
+  lines.push(`• Amount: \`${amountPaid}\``);
+  lines.push(`• Paid: \`${paidDate}\` at \`${paidTime}\``);
 
   const content = lines.join("\n");
 
