@@ -82,10 +82,17 @@ async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
     return;
   }
 
-  const body =
+  // Allow payload to be string (content) or object ({content, embeds, ...})
+  const baseBody =
     typeof payload === "string"
       ? { content: payload }
       : payload;
+
+  // Add flags: 4 to suppress embeds (Google Maps preview, etc.)
+  const body = {
+    flags: baseBody.flags ?? 4,  // if you ever pass a custom flags value, we won't override it
+    ...baseBody,
+  };
 
   try {
     console.log(`➡️ Sending to Discord [${contextLabel}]…`);
