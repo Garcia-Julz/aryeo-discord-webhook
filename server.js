@@ -1518,6 +1518,10 @@ const activityHandlers = {
 
 app.post("/aryeo-webhook", async (req, res) => {
   try {
+    console.log("✅ WEBHOOK HIT", new Date().toISOString());
+    console.log("Headers:", req.headers);
+    console.log("Body:", JSON.stringify(req.body, null, 2));
+    
     const signature = req.get("Signature");
 
     if (!verifyAryeoSignature(req.rawBody, signature)) {
