@@ -196,7 +196,7 @@ async function fetchOrder(orderId) {
   const url =
     `https://api.aryeo.com/v1/orders/${orderId}` +
     // explicitly ask for listing.address and address
-    `?include=items,listing,listing.address,address,customer,appointments,appointments.users,payments`;
+    `?include=items,listing,customer,appointments,appointments.users,payments`;
 
   try {
     console.log("🔍 Fetching order from Aryeo:", url);
@@ -291,7 +291,7 @@ async function fetchAppointmentsForDate(dateIso) {
   const url =
     `https://api.aryeo.com/v1/appointments` +
     `?filter[date]=${dateIso}` +
-    `&include=order,order.address,order.customer,order.items,order.listing,users`;
+    `&include=order,order.customer,order.items,order.listing,users`;
 
   try {
     console.log("🔍 Fetching today's appointments from Aryeo:", url);
@@ -1521,7 +1521,7 @@ app.post("/aryeo-webhook", async (req, res) => {
     console.log("✅ WEBHOOK HIT", new Date().toISOString());
     console.log("Headers:", req.headers);
     console.log("Body:", JSON.stringify(req.body, null, 2));
-    
+
     const signature = req.get("Signature");
 
     if (!verifyAryeoSignature(req.rawBody, signature)) {
