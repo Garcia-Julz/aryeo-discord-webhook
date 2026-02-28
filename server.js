@@ -1458,7 +1458,7 @@ app.post("/aryeo-webhook", async (req, res) => {
 
 // Run every day at 7:00 AM Eastern
 cron.schedule(
-  "0 7 * * *",
+  "23 18 * * *",
   () => {
     console.log("⏰ Running daily morning briefing...");
     sendMorningBriefing().catch((err) => {
