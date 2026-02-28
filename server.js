@@ -1,3 +1,7 @@
+app.get("/health", (req, res) => {
+  res.status(200).send("ok");
+});
+
 // server.js
 const express = require("express");
 const fetch = require("node-fetch");
