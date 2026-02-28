@@ -1710,7 +1710,7 @@ app.get("/test-smrtphone", async (req, res) => {
     }
 
     // Force the test number so clients never get pinged
-    const to = "9547367431";
+    const to = "9547163636";
 
     const message =
       (req.query.message && String(req.query.message)) ||
