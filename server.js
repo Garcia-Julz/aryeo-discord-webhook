@@ -6,6 +6,10 @@ const cron = require("node-cron");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// --- PHONE DISPLAY (Discord) ---
+// Safer default: mask phone in Discord logs
+const SHOW_FULL_CLIENT_PHONE_IN_DISCORD = false; // set true if you want full phone shown
+
 // --- ENV VARS ---
 // For real HMAC verification later if you want:
 const ARYEO_WEBHOOK_SECRET = process.env.ARYEO_WEBHOOK_SECRET;
@@ -118,10 +122,7 @@ async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
     return;
   }
 
-  const body =
-    typeof payload === "string"
-      ? { content: payload }
-      : payload;
+  const body = typeof payload === "string" ? { content: payload } : payload;
 
   try {
     console.log(`➡️ Sending to Discord [${contextLabel}]…`);
@@ -146,6 +147,91 @@ function buildGoogleMapsUrl(addressString) {
   return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
+// ---------------------------------------------------------
+// PHONE HELPERS (for Discord output)
+// ---------------------------------------------------------
+
+function normalizePhoneString(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const cleaned = raw.trim();
+  return cleaned ? cleaned : null;
+}
+
+// Try lots of likely field names + also scan keys that contain "phone"
+function extractPhoneFromCustomer(customer) {
+  if (!customer || typeof customer !== "object") return null;
+
+  // Common candidates first
+  const directCandidates = [
+    customer.phone,
+    customer.phone_number,
+    customer.mobile,
+    customer.mobile_phone,
+    customer.cell,
+    customer.cell_phone,
+    customer.primary_phone,
+    customer.contact_phone,
+    customer.telephone,
+  ]
+    .map(normalizePhoneString)
+    .filter(Boolean);
+
+  if (directCandidates.length > 0) return directCandidates[0];
+
+  // Fallback: scan any key containing "phone"
+  for (const [k, v] of Object.entries(customer)) {
+    if (typeof v !== "string") continue;
+    if (k.toLowerCase().includes("phone")) {
+      const candidate = normalizePhoneString(v);
+      if (candidate) return candidate;
+    }
+  }
+
+  return null;
+}
+
+function normalizePhone(raw) {
+  if (!raw) return null;
+  const digits = String(raw).replace(/\D/g, "");
+  if (!digits) return null;
+
+  // US numbers with optional leading 1
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  if (digits.length === 10) return digits;
+
+  // fallback (intl or weird formats)
+  return digits;
+}
+
+function formatPhoneUS(digits) {
+  if (!digits) return null;
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return digits;
+}
+
+function maskPhone(formattedOrDigits) {
+  if (!formattedOrDigits) return null;
+  const digits = String(formattedOrDigits).replace(/\D/g, "");
+  if (digits.length < 4) return "***";
+  const last4 = digits.slice(-4);
+  return `***-***-${last4}`;
+}
+
+function getClientPhoneLabel(customer) {
+  const raw = extractPhoneFromCustomer(customer);
+  if (!raw) return null;
+
+  const normalized = normalizePhone(raw);
+  if (!normalized) return null;
+
+  const pretty = formatPhoneUS(normalized);
+
+  if (SHOW_FULL_CLIENT_PHONE_IN_DISCORD) return pretty;
+  return maskPhone(pretty);
+}
+
 // Very simple drone-detection helper.
 // Adjust keywords if your product names change.
 function orderRequiresDrone(order) {
@@ -165,11 +251,7 @@ function orderRequiresDrone(order) {
   }
 
   const itemsLower = items.map((item) => {
-    const name =
-      item.name ||
-      item.product_name ||
-      item.title ||
-      "";
+    const name = item.name || item.product_name || item.title || "";
     return name.toLowerCase();
   });
 
@@ -195,7 +277,7 @@ async function fetchOrder(orderId) {
 
   const url =
     `https://api.aryeo.com/v1/orders/${orderId}` +
-    // explicitly ask for listing.address and address
+    // include only allowed relations (Aryeo does not allow listing.address or address here)
     `?include=items,listing,customer,appointments,appointments.users,payments`;
 
   try {
@@ -222,12 +304,12 @@ async function fetchOrder(orderId) {
       title: order.title,
       hasCustomer: !!order.customer,
       hasListing: !!order.listing,
-      listingHasAddress:
-        !!(order.listing &&
-           order.listing.address &&
-           order.listing.address.full_address),
-      hasOrderAddress:
-        !!(order.address && order.address.full_address),
+      listingHasAddress: !!(
+        order.listing &&
+        order.listing.address &&
+        order.listing.address.full_address
+      ),
+      hasOrderAddress: !!(order.address && order.address.full_address),
       appointmentsType: Array.isArray(order.appointments)
         ? `array(${order.appointments.length})`
         : typeof order.appointments,
@@ -260,7 +342,11 @@ async function fetchOrderPaymentInfo(orderId) {
 
     if (!resp.ok) {
       const text = await resp.text();
-      console.error("❌ Aryeo order payment-info fetch failed:", resp.status, text);
+      console.error(
+        "❌ Aryeo order payment-info fetch failed:",
+        resp.status,
+        text
+      );
       return null;
     }
 
@@ -330,10 +416,7 @@ async function fetchAppointmentsForDate(dateIso) {
           return appt;
         }
 
-        const orderId =
-          appt.order_id ||
-          (appt.order && appt.order.id) ||
-          null;
+        const orderId = appt.order_id || (appt.order && appt.order.id) || null;
 
         if (!orderId) {
           return appt;
@@ -354,23 +437,19 @@ async function fetchAppointmentsForDate(dateIso) {
     // Optional: log one appointment to confirm addresses
     if (enriched.length > 0) {
       const sample = enriched[0];
-      console.log(
-        "🧪 Sample enriched appointment address debug:",
-        {
-          orderId: sample.order && sample.order.id,
-          listingAddress:
-            sample.order &&
-            sample.order.listing &&
-            sample.order.listing.address &&
-            sample.order.listing.address.full_address,
-          orderAddress:
-            sample.order &&
-            sample.order.address &&
-            sample.order.address.full_address,
-          apptAddress:
-            sample.address && sample.address.full_address,
-        }
-      );
+      console.log("🧪 Sample enriched appointment address debug:", {
+        orderId: sample.order && sample.order.id,
+        listingAddress:
+          sample.order &&
+          sample.order.listing &&
+          sample.order.listing.address &&
+          sample.order.listing.address.full_address,
+        orderAddress:
+          sample.order &&
+          sample.order.address &&
+          sample.order.address.full_address,
+        apptAddress: sample.address && sample.address.full_address,
+      });
 
       // NEW: dump full object so we can see where Aryeo hides the address
       console.log(
@@ -395,7 +474,7 @@ function extractAddressFromObject(obj) {
     "full_address",
     "formatted_address",
     "address",
-    "property_full_address",   // covers Aryeo property address shapes
+    "property_full_address", // covers Aryeo property address shapes
     "property_address",
     "address_line1",
     "address1",
@@ -417,11 +496,7 @@ function extractAddressFromObject(obj) {
   if (!base) return null;
 
   // First, try the "nice" explicit keys
-  let city =
-    obj.city ||
-    obj.locality ||
-    obj.town ||
-    null;
+  let city = obj.city || obj.locality || obj.town || null;
 
   let state =
     obj.state ||
@@ -431,12 +506,7 @@ function extractAddressFromObject(obj) {
     obj.state_code ||
     null;
 
-  let postal =
-    obj.postal_code ||
-    obj.zip ||
-    obj.zip_code ||
-    obj.postcode ||
-    null;
+  let postal = obj.postal_code || obj.zip || obj.zip_code || obj.postcode || null;
 
   // 🔍 NEW: if any of city/state/postal are still missing,
   // scan all string fields and infer by key name (e.g. property_city, property_state, property_postal_code)
@@ -582,14 +652,16 @@ function buildMorningBriefingMessage(dateIso, appointments) {
 
     // Client
     const clientName = customer.name || "Unknown client";
+    const clientPhone = getClientPhoneLabel(customer);
 
     // Time
     const startRaw = appt.start_at || appt.scheduled_at || appt.date || null;
-    const when = startRaw ? formatToEastern(startRaw) : { date: "unknown", time: "unknown" };
+    const when = startRaw
+      ? formatToEastern(startRaw)
+      : { date: "unknown", time: "unknown" };
 
     // Address (from order.listing.address or order.address, or appt.address)
-    let propertyAddress =
-      extractAddressFromAppointment(appt) || "Unknown address";
+    let propertyAddress = extractAddressFromAppointment(appt) || "Unknown address";
 
     const mapsUrl =
       propertyAddress !== "Unknown address"
@@ -599,16 +671,13 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     // Photographer(s)
     let shooterNames = [];
     if (Array.isArray(users) && users.length > 0) {
-      shooterNames = users.map((u) =>
-        u.name ||
-        [u.first_name, u.last_name].filter(Boolean).join(" ")
-      ).filter(Boolean);
+      shooterNames = users
+        .map((u) => u.name || [u.first_name, u.last_name].filter(Boolean).join(" "))
+        .filter(Boolean);
     }
 
     const shootersLabel =
-      shooterNames.length === 0
-        ? "Unassigned"
-        : shooterNames.join(", ");
+      shooterNames.length === 0 ? "Unassigned" : shooterNames.join(", ");
 
     // Service summary
     let serviceSummary = "Unknown service";
@@ -622,32 +691,34 @@ function buildMorningBriefingMessage(dateIso, appointments) {
       } else if (names.length > 1) {
         const firstFew = names.slice(0, 3).join(", ");
         serviceSummary =
-          names.length > 3
-            ? `${firstFew} (+${names.length - 3} more)`
-            : firstFew;
+          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
       }
     }
 
     // Order link
     const orderId = order.id;
-    let orderLabel = order.number ? `Order #${order.number}` : (order.title || orderId || "Order");
+    let orderLabel = order.number
+      ? `Order #${order.number}`
+      : order.title || orderId || "Order";
+
     const orderStatusUrl =
       order.status_url ||
       order.invoice_url ||
       order.payment_url ||
-      (orderId
-        ? `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`
-        : null);
+      (orderId ? `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit` : null);
 
     lines.push(`**Appointment ${idx + 1}**`);
     lines.push(`• Client: \`${clientName}\``);
+    if (clientPhone) lines.push(`• Phone: \`${clientPhone}\``);
     lines.push(`• Time: \`${when.time}\``);
     lines.push(`• Service: \`${serviceSummary}\``);
     lines.push(`• Photographer: \`${shootersLabel}\``);
     lines.push(`• Address: \`${propertyAddress}\``);
+
     // if (mapsUrl) {
     //   lines.push(`• Map: ${mapsUrl}`);
     // }
+
     if (orderStatusUrl) {
       lines.push(`• Order: [${orderLabel}](${orderStatusUrl})`);
     }
@@ -770,9 +841,7 @@ async function handleOrderCreated(activity) {
       if (Array.isArray(appt.users) && appt.users.length > 0) {
         appt.users.forEach((u) => {
           const userName =
-            u.name ||
-            [u.first_name, u.last_name].filter(Boolean).join(" ") ||
-            null;
+            u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
 
           if (userName) {
             photographerNames.push(userName);
@@ -798,9 +867,7 @@ async function handleOrderCreated(activity) {
       } else if (names.length > 1) {
         const firstFew = names.slice(0, 3).join(", ");
         serviceSummary =
-          names.length > 3
-            ? `${firstFew} (+${names.length - 3} more)`
-            : firstFew;
+          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
       }
     }
 
@@ -988,7 +1055,10 @@ async function handleOrderPaymentReceived(activity) {
 
     if (resource.total_price_formatted) {
       amountLabel = resource.total_price_formatted;
-    } else if (typeof resource.total_price === "number" && resource.total_price !== 0) {
+    } else if (
+      typeof resource.total_price === "number" &&
+      resource.total_price !== 0
+    ) {
       const val = resource.total_price;
       const dollars = val > 9999 ? val / 100 : val;
       amountLabel = `$${dollars.toFixed(2)}`;
@@ -996,7 +1066,10 @@ async function handleOrderPaymentReceived(activity) {
       const val = resource.amount;
       const dollars = val > 9999 ? val / 100 : val;
       amountLabel = `$${dollars.toFixed(2)}`;
-    } else if (typeof resource.amount === "string" && resource.amount.trim() !== "") {
+    } else if (
+      typeof resource.amount === "string" &&
+      resource.amount.trim() !== ""
+    ) {
       amountLabel = resource.amount;
     }
   }
@@ -1298,8 +1371,7 @@ async function handlePhotographerAssignmentChanged(activity) {
       ? "unassigned from"
       : "assigned to";
 
-  // --- New: pull order + appointment + address + service details ---
-
+  // --- pull order + appointment + address + service details ---
   let orderLabel = orderId || "unknown";
   let orderNumber = null;
   let orderTitle = null;
@@ -1408,7 +1480,6 @@ async function handlePhotographerAssignmentChanged(activity) {
   const changeWhen = formatToEastern(occurred_at);
 
   // --- Build Discord message ---
-
   let lines = [];
   lines.push("👥 Photographer Assignment Updated");
   lines.push("");
@@ -1490,10 +1561,6 @@ async function handlePhotographerAssignmentChanged(activity) {
 // ---------------------------------------------------------
 // ACTIVITY NAME → HANDLER MAP
 // ---------------------------------------------------------
-//
-// ⚠️ Names here are our best guess based on Aryeo’s conventions.
-// When you see real activity.name values coming through from Aryeo,
-// update these keys to match exactly.
 
 const activityHandlers = {
   ORDER_CREATED: handleOrderCreated,
