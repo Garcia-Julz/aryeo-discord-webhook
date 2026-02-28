@@ -8,9 +8,17 @@ const PORT = process.env.PORT || 3000;
 
 // --- PHONE DISPLAY (Discord) ---
 // Safer default: mask phone in Discord logs
-const SHOW_FULL_CLIENT_PHONE_IN_DISCORD = false; // set true if you want full phone shown
+const SHOW_FULL_CLIENT_PHONE_IN_DISCORD =
+  (process.env.SHOW_FULL_CLIENT_PHONE_IN_DISCORD || "").toLowerCase() === "true"; // set env var true to show full phone
 
 // --- ENV VARS ---
+// --- SMRTPHONE (SMS) ---
+const SMRTPHONE_API_KEY = process.env.SMRTPHONE_API_KEY;
+const SMRTPHONE_FROM_NUMBER = process.env.SMRTPHONE_FROM_NUMBER; // digits only (e.g. 18135551234)
+const SMRTPHONE_TEST_TOKEN = process.env.SMRTPHONE_TEST_TOKEN; // protect test route
+const SMRTPHONE_DRY_RUN =
+  (process.env.SMRTPHONE_DRY_RUN || "").toLowerCase() === "true";
+
 // For real HMAC verification later if you want:
 const ARYEO_WEBHOOK_SECRET = process.env.ARYEO_WEBHOOK_SECRET;
 
@@ -42,6 +50,15 @@ console.log("Boot: DRONE_WEBHOOK_URL present?", !!DRONE_WEBHOOK_URL);
 console.log("Boot: QUICKBOOKS_WEBHOOK_URL present?", !!QUICKBOOKS_WEBHOOK_URL);
 console.log("Boot: BOOKINGS_WEBHOOK_URL present?", !!BOOKINGS_WEBHOOK_URL);
 console.log("Boot: DRONE_MENTION =", DRONE_MENTION);
+
+console.log("Boot: SMRTPHONE_API_KEY present?", !!SMRTPHONE_API_KEY);
+console.log("Boot: SMRTPHONE_FROM_NUMBER present?", !!SMRTPHONE_FROM_NUMBER);
+console.log("Boot: SMRTPHONE_TEST_TOKEN present?", !!SMRTPHONE_TEST_TOKEN);
+console.log("Boot: SMRTPHONE_DRY_RUN =", SMRTPHONE_DRY_RUN);
+console.log(
+  "Boot: SHOW_FULL_CLIENT_PHONE_IN_DISCORD =",
+  SHOW_FULL_CLIENT_PHONE_IN_DISCORD
+);
 
 // --- BODY PARSER (keep rawBody in case we later validate signatures) ---
 app.use(
@@ -147,6 +164,61 @@ function buildGoogleMapsUrl(addressString) {
   return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
+// --- SMRTPHONE helper ---
+async function sendSmrtPhoneSms({ from, to, message }) {
+  if (!SMRTPHONE_API_KEY) {
+    console.error("❌ Missing SMRTPHONE_API_KEY");
+    return { ok: false, error: "Missing SMRTPHONE_API_KEY" };
+  }
+  if (!from || !to || !message) {
+    console.error("❌ sendSmrtPhoneSms missing from/to/message");
+    return { ok: false, error: "Missing from/to/message" };
+  }
+
+  const url = "https://phone.smrt.studio/sms/send";
+
+  const params = new URLSearchParams({
+    from: String(from),
+    to: String(to),
+    message: String(message),
+  });
+
+  if (SMRTPHONE_DRY_RUN) {
+    console.log("🧪 SMRTPHONE_DRY_RUN enabled. Would send:", {
+      url,
+      headers: { "X-Auth-smrtPhone": "***" },
+      body: params.toString(),
+    });
+    return { ok: true, dryRun: true };
+  }
+
+  try {
+    console.log("➡️ Sending SMS via smrtPhone…", { to, from });
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "X-Auth-smrtPhone": SMRTPHONE_API_KEY,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: params.toString(),
+    });
+
+    const text = await resp.text();
+    console.log("📨 smrtPhone status:", resp.status);
+
+    if (!resp.ok) {
+      console.error("❌ smrtPhone error response:", text);
+      return { ok: false, status: resp.status, body: text };
+    }
+
+    return { ok: true, status: resp.status, body: text };
+  } catch (err) {
+    console.error("💥 Error sending smrtPhone SMS:", err);
+    return { ok: false, error: String(err) };
+  }
+}
+
 // ---------------------------------------------------------
 // PHONE HELPERS (for Discord output)
 // ---------------------------------------------------------
@@ -230,6 +302,13 @@ function getClientPhoneLabel(customer) {
 
   if (SHOW_FULL_CLIENT_PHONE_IN_DISCORD) return pretty;
   return maskPhone(pretty);
+}
+
+// NEW: Use this when you need the real digits for texting (not masked)
+function getClientPhoneDigits(customer) {
+  const raw = extractPhoneFromCustomer(customer);
+  if (!raw) return null;
+  return normalizePhone(raw); // returns 10-digit US (or fallback digits)
 }
 
 // Very simple drone-detection helper.
@@ -508,8 +587,7 @@ function extractAddressFromObject(obj) {
 
   let postal = obj.postal_code || obj.zip || obj.zip_code || obj.postcode || null;
 
-  // 🔍 NEW: if any of city/state/postal are still missing,
-  // scan all string fields and infer by key name (e.g. property_city, property_state, property_postal_code)
+  // if any of city/state/postal are still missing, scan all string fields and infer by key name
   if (!city || !state || !postal) {
     for (const [key, value] of Object.entries(obj)) {
       if (typeof value !== "string") continue;
@@ -586,18 +664,17 @@ function extractAddressFromAppointment(appt) {
   if (!appt) return null;
   const order = appt.order || {};
 
-  // 🔀 Merge listing.address + listing into one object
+  // Merge listing.address + listing into one object
   const mergedListing = order.listing
     ? { ...(order.listing.address || {}), ...order.listing }
     : null;
 
-  // 🔀 Merge order.address + order into one object
+  // Merge order.address + order into one object
   const mergedOrder = Object.keys(order).length
     ? { ...(order.address || {}), ...order }
     : null;
 
   const candidates = [
-    // Most informative first
     mergedListing,
     mergedOrder,
     order.listing && order.listing.address,
@@ -620,7 +697,7 @@ function extractAddressFromAppointment(appt) {
   const deepAddr = findAnyFullAddress({ appointment: appt, order });
   if (deepAddr) return deepAddr;
 
-  // Fallback 2: *very* loose scan for any address-like string
+  // Fallback 2: very loose scan for any address-like string
   const looseAddr = findAnyAddressLikeString({ appointment: appt, order });
   if (looseAddr) return looseAddr;
 
@@ -660,19 +737,19 @@ function buildMorningBriefingMessage(dateIso, appointments) {
       ? formatToEastern(startRaw)
       : { date: "unknown", time: "unknown" };
 
-    // Address (from order.listing.address or order.address, or appt.address)
-    let propertyAddress = extractAddressFromAppointment(appt) || "Unknown address";
-
-    const mapsUrl =
-      propertyAddress !== "Unknown address"
-        ? buildGoogleMapsUrl(propertyAddress)
-        : null;
+    // Address
+    let propertyAddress =
+      extractAddressFromAppointment(appt) || "Unknown address";
 
     // Photographer(s)
     let shooterNames = [];
     if (Array.isArray(users) && users.length > 0) {
       shooterNames = users
-        .map((u) => u.name || [u.first_name, u.last_name].filter(Boolean).join(" "))
+        .map(
+          (u) =>
+            u.name ||
+            [u.first_name, u.last_name].filter(Boolean).join(" ")
+        )
         .filter(Boolean);
     }
 
@@ -691,7 +768,9 @@ function buildMorningBriefingMessage(dateIso, appointments) {
       } else if (names.length > 1) {
         const firstFew = names.slice(0, 3).join(", ");
         serviceSummary =
-          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
+          names.length > 3
+            ? `${firstFew} (+${names.length - 3} more)`
+            : firstFew;
       }
     }
 
@@ -715,14 +794,10 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     lines.push(`• Photographer: \`${shootersLabel}\``);
     lines.push(`• Address: \`${propertyAddress}\``);
 
-    // if (mapsUrl) {
-    //   lines.push(`• Map: ${mapsUrl}`);
-    // }
-
     if (orderStatusUrl) {
       lines.push(`• Order: [${orderLabel}](${orderStatusUrl})`);
     }
-    lines.push(""); // blank line between appointments
+    lines.push("");
   });
 
   return lines.join("\n");
@@ -810,12 +885,16 @@ async function handleOrderCreated(activity) {
     }
 
     // Prefer listing.address if present
-    if (order.listing && order.listing.address && order.listing.address.full_address) {
+    if (
+      order.listing &&
+      order.listing.address &&
+      order.listing.address.full_address
+    ) {
       propertyAddress = order.listing.address.full_address;
     } else if (order.address && order.address.full_address) {
       propertyAddress = order.address.full_address;
     } else {
-      // Fallback to deep scan, just like the morning briefing
+      // Fallback to deep scan
       const deepAddr = findAnyFullAddress(order);
       if (deepAddr) {
         propertyAddress = deepAddr;
@@ -829,7 +908,8 @@ async function handleOrderCreated(activity) {
     // Appointment – take first appointment if present
     if (Array.isArray(order.appointments) && order.appointments.length > 0) {
       const appt = order.appointments[0];
-      const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+      const appointmentRaw =
+        appt.start_at || appt.scheduled_at || appt.date || null;
 
       if (appointmentRaw && typeof appointmentRaw === "string") {
         const formatted = formatToEastern(appointmentRaw);
@@ -841,7 +921,9 @@ async function handleOrderCreated(activity) {
       if (Array.isArray(appt.users) && appt.users.length > 0) {
         appt.users.forEach((u) => {
           const userName =
-            u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
+            u.name ||
+            [u.first_name, u.last_name].filter(Boolean).join(" ") ||
+            null;
 
           if (userName) {
             photographerNames.push(userName);
@@ -867,7 +949,9 @@ async function handleOrderCreated(activity) {
       } else if (names.length > 1) {
         const firstFew = names.slice(0, 3).join(", ");
         serviceSummary =
-          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
+          names.length > 3
+            ? `${firstFew} (+${names.length - 3} more)`
+            : firstFew;
       }
     }
 
@@ -884,10 +968,7 @@ async function handleOrderCreated(activity) {
   }
 
   // Build label "Order #1234" or fallback to title/ID
-  const orderLabel =
-    (orderNumber && `Order #${orderNumber}`) ||
-    orderTitle ||
-    orderId;
+  const orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   // Build a cleaner Drone notification message
   let lines = [];
@@ -980,14 +1061,12 @@ async function handleOrderPaymentReceived(activity) {
     if (Array.isArray(order.payments) && order.payments.length > 0) {
       const lastPayment = order.payments[order.payments.length - 1];
 
-      // 🔍 TEMP: log exactly what Aryeo is sending for payments
       console.log(
         "💰 Payments debug for order",
         orderId,
         JSON.stringify(order.payments, null, 2)
       );
 
-      // 1st: look for nicely formatted strings
       const niceString =
         lastPayment.total_price_formatted ||
         lastPayment.amount_formatted ||
@@ -998,7 +1077,6 @@ async function handleOrderPaymentReceived(activity) {
       if (niceString) {
         amountLabel = niceString;
       } else {
-        // 2nd: look for numeric amounts and format them (ignore 0s)
         const numericCandidates = [
           lastPayment.total_price,
           lastPayment.amount,
@@ -1007,7 +1085,6 @@ async function handleOrderPaymentReceived(activity) {
         ].filter((val) => typeof val === "number" && val > 0);
 
         for (const val of numericCandidates) {
-          // Heuristic: large numbers are probably cents
           if (val > 9999) {
             amountLabel = `$${(val / 100).toFixed(2)}`;
           } else {
@@ -1045,9 +1122,8 @@ async function handleOrderPaymentReceived(activity) {
     }
   }
 
-  // 2) If we *still* don't know the amount, try to read it directly off the webhook payload
+  // 2) If we still don't know the amount, try to read it directly off the webhook payload
   if (amountLabel === "unknown" && resource) {
-    // Log the raw webhook payload so we can see exactly what Aryeo sends
     console.log(
       "💰 Webhook resource for ORDER_PAYMENT_RECEIVED:",
       JSON.stringify(resource, null, 2)
@@ -1074,11 +1150,10 @@ async function handleOrderPaymentReceived(activity) {
     }
   }
 
-  // 3) If we *still* don't know, hit the payment-info endpoint
+  // 3) If we still don't know, hit the payment-info endpoint
   if (amountLabel === "unknown") {
     const paymentInfo = await fetchOrderPaymentInfo(orderId);
     if (paymentInfo) {
-      // Log the raw shape so we can adjust field names once we see it.
       console.log(
         "💳 payment-info payload for order",
         orderId,
@@ -1115,18 +1190,12 @@ async function handleOrderPaymentReceived(activity) {
     }
   }
 
-  // 4) Build a friendly label for the order
-  const label =
-    (orderNumber && `Order #${orderNumber}`) ||
-    orderTitle ||
-    orderId;
+  const label = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
-  // 5) If Aryeo didn't give us a direct URL, fall back to your admin link
   if (!orderStatusUrl) {
     orderStatusUrl = `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
   }
 
-  // 6) Format payment time in Eastern (from the activity timestamp)
   const when = formatToEastern(occurred_at);
 
   let lines = [];
@@ -1191,23 +1260,16 @@ async function handleOrderCanceled(activity) {
       } else if (names.length > 1) {
         const firstFew = names.slice(0, 3).join(", ");
         serviceSummary =
-          names.length > 3
-            ? `${firstFew} (+${names.length - 3} more)`
-            : firstFew;
+          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
       }
     }
   }
 
-  const label =
-    (orderNumber && `Order #${orderNumber}`) ||
-    orderTitle ||
-    orderId;
+  const label = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   const when = formatToEastern(occurred_at);
   const reason =
-    activity.reason ||
-    (activity.metadata && activity.metadata.reason) ||
-    null;
+    activity.reason || (activity.metadata && activity.metadata.reason) || null;
 
   let lines = [];
   lines.push("❌ **Order Cancelled**");
@@ -1236,7 +1298,6 @@ async function handleOrderCanceled(activity) {
 async function handleAppointmentRescheduled(activity) {
   const { occurred_at, resource } = activity || {};
 
-  const appointmentId = resource?.id;
   const orderId = resource?.order_id || resource?.order?.id;
 
   let orderLabel = orderId || "unknown";
@@ -1246,23 +1307,23 @@ async function handleAppointmentRescheduled(activity) {
   let propertyAddress = "unknown";
   let mapsUrl = null;
 
-  // If we can see an order_id, try to pull richer info from the order
   if (orderId) {
     const order = await fetchOrder(orderId);
     if (order) {
       const orderNumber = order.number || null;
       const orderTitle = order.title || order.identifier || orderId;
 
-      orderLabel =
-        (orderNumber && `Order #${orderNumber}`) ||
-        orderTitle ||
-        orderId;
+      orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
       if (order.customer && order.customer.name) {
         customerName = order.customer.name;
       }
 
-      if (order.listing && order.listing.address && order.listing.address.full_address) {
+      if (
+        order.listing &&
+        order.listing.address &&
+        order.listing.address.full_address
+      ) {
         propertyAddress = order.listing.address.full_address;
       } else if (order.address && order.address.full_address) {
         propertyAddress = order.address.full_address;
@@ -1285,7 +1346,6 @@ async function handleAppointmentRescheduled(activity) {
       }
     }
   } else {
-    // Fallback: try to pull directly off the resource in case Aryeo sends an appointment object
     const appointmentRaw =
       resource?.start_at || resource?.scheduled_at || resource?.date || null;
     if (appointmentRaw && typeof appointmentRaw === "string") {
@@ -1317,9 +1377,7 @@ async function handleAppointmentRescheduled(activity) {
     lines.push(`• Map: ${mapsUrl}`);
   }
   lines.push("");
-  lines.push(
-    `• Updated at: \`${changeWhen.date} – ${changeWhen.time}\``
-  );
+  lines.push(`• Updated at: \`${changeWhen.date} – ${changeWhen.time}\``);
 
   const content = lines.join("\n");
   await sendToDiscord(
@@ -1336,16 +1394,13 @@ async function handlePhotographerAssignmentChanged(activity) {
   const appointmentId = resource?.id || resource?.appointment_id;
   const orderId = resource?.order_id || resource?.order?.id;
 
-  // Shooter names / mentions (same as before)
   let shooterNames = [];
   let shooterMentions = [];
 
   if (resource?.user) {
     const u = resource.user;
     const userName =
-      u.name ||
-      [u.first_name, u.last_name].filter(Boolean).join(" ") ||
-      null;
+      u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
     if (userName) {
       shooterNames.push(userName);
       const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
@@ -1354,9 +1409,7 @@ async function handlePhotographerAssignmentChanged(activity) {
   } else if (Array.isArray(resource?.users)) {
     resource.users.forEach((u) => {
       const userName =
-        u.name ||
-        [u.first_name, u.last_name].filter(Boolean).join(" ") ||
-        null;
+        u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
       if (userName) {
         shooterNames.push(userName);
         const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
@@ -1365,13 +1418,11 @@ async function handlePhotographerAssignmentChanged(activity) {
     });
   }
 
-  // Direction: assigned vs unassigned
   const direction =
     name && name.toUpperCase().includes("UNASSIGN")
       ? "unassigned from"
       : "assigned to";
 
-  // --- pull order + appointment + address + service details ---
   let orderLabel = orderId || "unknown";
   let orderNumber = null;
   let orderTitle = null;
@@ -1395,16 +1446,12 @@ async function handlePhotographerAssignmentChanged(activity) {
         order.payment_url ||
         `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
 
-      orderLabel =
-        (orderNumber && `Order #${orderNumber}`) ||
-        orderTitle ||
-        orderId;
+      orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
       if (order.customer && order.customer.name) {
         customerName = order.customer.name;
       }
 
-      // Address
       if (
         order.listing &&
         order.listing.address &&
@@ -1419,7 +1466,6 @@ async function handlePhotographerAssignmentChanged(activity) {
         mapsUrl = buildGoogleMapsUrl(propertyAddress);
       }
 
-      // Service summary from items
       const items = order.items || order.order_items || [];
       if (Array.isArray(items) && items.length > 0) {
         const names = items
@@ -1431,13 +1477,10 @@ async function handlePhotographerAssignmentChanged(activity) {
         } else if (names.length > 1) {
           const firstFew = names.slice(0, 3).join(", ");
           serviceSummary =
-            names.length > 3
-              ? `${firstFew} (+${names.length - 3} more)`
-              : firstFew;
+            names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
         }
       }
 
-      // Appointment date/time – try to match appointmentId, else fall back to first
       let appt = null;
       if (Array.isArray(order.appointments) && order.appointments.length > 0) {
         if (appointmentId) {
@@ -1461,7 +1504,6 @@ async function handlePhotographerAssignmentChanged(activity) {
       }
     }
   } else {
-    // Fallback: if Aryeo sends appointment fields directly on the resource
     const appointmentRaw =
       resource?.start_at || resource?.scheduled_at || resource?.date || null;
     if (appointmentRaw && typeof appointmentRaw === "string") {
@@ -1476,32 +1518,26 @@ async function handlePhotographerAssignmentChanged(activity) {
     }
   }
 
-  // When the change was recorded (this is from Aryeo, not manual)
   const changeWhen = formatToEastern(occurred_at);
 
-  // --- Build Discord message ---
   let lines = [];
   lines.push("👥 Photographer Assignment Updated");
   lines.push("");
 
-  // Order with link
   if (orderStatusUrl && orderLabel !== "unknown") {
     lines.push(`• Order: [${orderLabel}](${orderStatusUrl})`);
   } else if (orderLabel !== "unknown") {
     lines.push(`• Order: \`${orderLabel}\``);
   }
 
-  // Client
   if (customerName !== "unknown") {
     lines.push(`• Client: \`${customerName}\``);
   }
 
-  // Service
   if (serviceSummary !== "unknown") {
     lines.push(`• Service: \`${serviceSummary}\``);
   }
 
-  // Appointment block
   if (
     appointmentDate !== "unknown" ||
     appointmentTime !== "unknown" ||
@@ -1523,27 +1559,18 @@ async function handlePhotographerAssignmentChanged(activity) {
     }
   }
 
-  // Shooter line
   if (shooterNames.length > 0) {
     const shootersLabel =
-      shooterNames.length === 1
-        ? shooterNames[0]
-        : shooterNames.join(", ");
+      shooterNames.length === 1 ? shooterNames[0] : shooterNames.join(", ");
     lines.push("");
-    lines.push(
-      `• Photographer(s) ${direction} appointment: \`${shootersLabel}\``
-    );
+    lines.push(`• Photographer(s) ${direction} appointment: \`${shootersLabel}\``);
   } else {
     lines.push("");
     lines.push("• Photographer(s) changed (names not parsed).");
   }
 
-  // Change time
-  lines.push(
-    `• Change recorded at: \`${changeWhen.date} – ${changeWhen.time}\``
-  );
+  lines.push(`• Change recorded at: \`${changeWhen.date} – ${changeWhen.time}\``);
 
-  // Mentions at the end
   if (shooterMentions.length > 0) {
     lines.push("");
     lines.push(shooterMentions.join(" "));
@@ -1566,14 +1593,11 @@ const activityHandlers = {
   ORDER_CREATED: handleOrderCreated,
   ORDER_PAYMENT_RECEIVED: handleOrderPaymentReceived,
 
-  // Order cancelled (Aryeo might use either spelling)
   ORDER_CANCELED: handleOrderCanceled,
   ORDER_CANCELLED: handleOrderCanceled,
 
-  // Appointment rescheduled
   APPOINTMENT_RESCHEDULED: handleAppointmentRescheduled,
 
-  // Photographer assignment changes (adjust once you see real names)
   APPOINTMENT_USER_ASSIGNED: handlePhotographerAssignmentChanged,
   APPOINTMENT_USER_UNASSIGNED: handlePhotographerAssignmentChanged,
   APPOINTMENT_USERS_CHANGED: handlePhotographerAssignmentChanged,
@@ -1671,12 +1695,52 @@ app.get("/test-morning-briefing", async (req, res) => {
   }
 });
 
+// ✅ SMRTPHONE TEST ROUTE (FORCES recipient to 954-736-7431)
+// Call it like:
+// https://YOUR-RAILWAY-DOMAIN/test-smrtphone?token=YOUR_TEST_TOKEN&message=Hello%20world
+app.get("/test-smrtphone", async (req, res) => {
+  try {
+    const token = req.query.token || "";
+    if (!SMRTPHONE_TEST_TOKEN || token !== SMRTPHONE_TEST_TOKEN) {
+      return res.status(401).send("Unauthorized");
+    }
+
+    if (!SMRTPHONE_FROM_NUMBER) {
+      return res.status(500).send("Missing SMRTPHONE_FROM_NUMBER env var");
+    }
+
+    // Force the test number so clients never get pinged
+    const to = "9547367431";
+
+    const message =
+      (req.query.message && String(req.query.message)) ||
+      "🧪 Test SMS from Railway smrtPhone integration.";
+
+    const result = await sendSmrtPhoneSms({
+      from: SMRTPHONE_FROM_NUMBER,
+      to,
+      message,
+    });
+
+    if (!result.ok) {
+      return res
+        .status(500)
+        .send(`Failed to send SMS. Details: ${JSON.stringify(result)}`);
+    }
+
+    return res.send(
+      `✅ Sent (or dry-run) smrtPhone test SMS to ${to}. Result: ${JSON.stringify(result)}`
+    );
+  } catch (err) {
+    console.error("💥 Error in /test-smrtphone:", err);
+    return res.status(500).send("Server error");
+  }
+});
+
 app.get("/test-drone", async (req, res) => {
   await sendToDiscord(
     DRONE_WEBHOOK_URL,
-    {
-      content: "🧪 Test message to **Drone** channel from `/test-drone`",
-    },
+    { content: "🧪 Test message to **Drone** channel from `/test-drone`" },
     "DRONE-TEST"
   );
   res.send("Sent test message to Drone Discord webhook (if configured).");
@@ -1685,9 +1749,7 @@ app.get("/test-drone", async (req, res) => {
 app.get("/test-quickbooks", async (req, res) => {
   await sendToDiscord(
     QUICKBOOKS_WEBHOOK_URL,
-    {
-      content: "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`",
-    },
+    { content: "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`" },
     "QB-TEST"
   );
   res.send("Sent test message to QuickBooks Discord webhook (if configured).");
@@ -1696,9 +1758,7 @@ app.get("/test-quickbooks", async (req, res) => {
 app.get("/test-bookings", async (req, res) => {
   await sendToDiscord(
     BOOKINGS_WEBHOOK_URL,
-    {
-      content: "🧪 Test message to **Bookings** channel from `/test-bookings`",
-    },
+    { content: "🧪 Test message to **Bookings** channel from `/test-bookings`" },
     "BOOKINGS-TEST"
   );
   res.send("Sent test message to Bookings Discord webhook (if configured).");
