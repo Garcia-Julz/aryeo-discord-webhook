@@ -16,6 +16,7 @@ const SHOW_FULL_CLIENT_PHONE_IN_DISCORD =
 const SMRTPHONE_API_KEY = process.env.SMRTPHONE_API_KEY;
 const SMRTPHONE_FROM_NUMBER = process.env.SMRTPHONE_FROM_NUMBER; // digits only (e.g. 18135551234)
 const SMRTPHONE_TEST_TOKEN = process.env.SMRTPHONE_TEST_TOKEN; // protect test route
+const SMRTPHONE_TEST_NUMBER = process.env.SMRTPHONE_TEST_NUMBER; // digits only (e.g. 19547163636)
 const SMRTPHONE_DRY_RUN =
   (process.env.SMRTPHONE_DRY_RUN || "").toLowerCase() === "true";
 
@@ -54,6 +55,7 @@ console.log("Boot: DRONE_MENTION =", DRONE_MENTION);
 console.log("Boot: SMRTPHONE_API_KEY present?", !!SMRTPHONE_API_KEY);
 console.log("Boot: SMRTPHONE_FROM_NUMBER present?", !!SMRTPHONE_FROM_NUMBER);
 console.log("Boot: SMRTPHONE_TEST_TOKEN present?", !!SMRTPHONE_TEST_TOKEN);
+console.log("Boot: SMRTPHONE_TEST_NUMBER present?", !!SMRTPHONE_TEST_NUMBER);
 console.log("Boot: SMRTPHONE_DRY_RUN =", SMRTPHONE_DRY_RUN);
 console.log(
   "Boot: SHOW_FULL_CLIENT_PHONE_IN_DISCORD =",
@@ -968,7 +970,8 @@ async function handleOrderCreated(activity) {
   }
 
   // Build label "Order #1234" or fallback to title/ID
-  const orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+  const orderLabel =
+    (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   // Build a cleaner Drone notification message
   let lines = [];
@@ -1190,7 +1193,8 @@ async function handleOrderPaymentReceived(activity) {
     }
   }
 
-  const label = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+  const label =
+    (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   if (!orderStatusUrl) {
     orderStatusUrl = `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
@@ -1260,12 +1264,15 @@ async function handleOrderCanceled(activity) {
       } else if (names.length > 1) {
         const firstFew = names.slice(0, 3).join(", ");
         serviceSummary =
-          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
+          names.length > 3
+            ? `${firstFew} (+${names.length - 3} more)`
+            : firstFew;
       }
     }
   }
 
-  const label = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+  const label =
+    (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   const when = formatToEastern(occurred_at);
   const reason =
@@ -1313,7 +1320,8 @@ async function handleAppointmentRescheduled(activity) {
       const orderNumber = order.number || null;
       const orderTitle = order.title || order.identifier || orderId;
 
-      orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+      orderLabel =
+        (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
       if (order.customer && order.customer.name) {
         customerName = order.customer.name;
@@ -1446,7 +1454,8 @@ async function handlePhotographerAssignmentChanged(activity) {
         order.payment_url ||
         `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
 
-      orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+      orderLabel =
+        (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
       if (order.customer && order.customer.name) {
         customerName = order.customer.name;
@@ -1477,7 +1486,9 @@ async function handlePhotographerAssignmentChanged(activity) {
         } else if (names.length > 1) {
           const firstFew = names.slice(0, 3).join(", ");
           serviceSummary =
-            names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
+            names.length > 3
+              ? `${firstFew} (+${names.length - 3} more)`
+              : firstFew;
         }
       }
 
@@ -1563,7 +1574,9 @@ async function handlePhotographerAssignmentChanged(activity) {
     const shootersLabel =
       shooterNames.length === 1 ? shooterNames[0] : shooterNames.join(", ");
     lines.push("");
-    lines.push(`• Photographer(s) ${direction} appointment: \`${shootersLabel}\``);
+    lines.push(
+      `• Photographer(s) ${direction} appointment: \`${shootersLabel}\``
+    );
   } else {
     lines.push("");
     lines.push("• Photographer(s) changed (names not parsed).");
@@ -1695,7 +1708,7 @@ app.get("/test-morning-briefing", async (req, res) => {
   }
 });
 
-// ✅ SMRTPHONE TEST ROUTE (FORCES recipient to 954-736-7431)
+// ✅ SMRTPHONE TEST ROUTE (sends to SMRTPHONE_TEST_NUMBER or fallback)
 // Call it like:
 // https://YOUR-RAILWAY-DOMAIN/test-smrtphone?token=YOUR_TEST_TOKEN&message=Hello%20world
 app.get("/test-smrtphone", async (req, res) => {
@@ -1709,8 +1722,7 @@ app.get("/test-smrtphone", async (req, res) => {
       return res.status(500).send("Missing SMRTPHONE_FROM_NUMBER env var");
     }
 
-    // Force the test number so clients never get pinged
-    const to = "9547163636";
+    const to = (SMRTPHONE_TEST_NUMBER || "").replace(/\D/g, "") || "9547367431";
 
     const message =
       (req.query.message && String(req.query.message)) ||
@@ -1729,10 +1741,88 @@ app.get("/test-smrtphone", async (req, res) => {
     }
 
     return res.send(
-      `✅ Sent (or dry-run) smrtPhone test SMS to ${to}. Result: ${JSON.stringify(result)}`
+      `✅ Sent smrtPhone test SMS to ${to}. Result: ${JSON.stringify(result)}`
     );
   } catch (err) {
     console.error("💥 Error in /test-smrtphone:", err);
+    return res.status(500).send("Server error");
+  }
+});
+
+// ✅ LIVE APPOINTMENT SMS TEST (uses today's Aryeo appointments, sends to test number only)
+// Call it like:
+// https://YOUR-RAILWAY-DOMAIN/test-live-reminder?token=YOUR_TEST_TOKEN
+// Optional: ?idx=0 (pick appointment by index)
+app.get("/test-live-reminder", async (req, res) => {
+  try {
+    const token = req.query.token || "";
+    if (!SMRTPHONE_TEST_TOKEN || token !== SMRTPHONE_TEST_TOKEN) {
+      return res.status(401).send("Unauthorized");
+    }
+
+    if (!SMRTPHONE_FROM_NUMBER) {
+      return res.status(500).send("Missing SMRTPHONE_FROM_NUMBER env var");
+    }
+
+    const to = (SMRTPHONE_TEST_NUMBER || "").replace(/\D/g, "") || "9547367431";
+
+    // Today's date in Eastern (YYYY-MM-DD)
+    const now = new Date();
+    const estParts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(now);
+
+    const year = estParts.find((p) => p.type === "year").value;
+    const month = estParts.find((p) => p.type === "month").value;
+    const day = estParts.find((p) => p.type === "day").value;
+    const todayEst = `${year}-${month}-${day}`;
+
+    const appointments = (await fetchAppointmentsForDate(todayEst)) || [];
+    if (appointments.length === 0) {
+      return res.status(200).send(`No appointments found for ${todayEst}`);
+    }
+
+    // Use first appointment (or allow picking via ?idx=)
+    const idx = Math.max(0, parseInt(req.query.idx || "0", 10) || 0);
+    const appt = appointments[Math.min(idx, appointments.length - 1)];
+
+    const order = appt.order || {};
+    const customer = order.customer || {};
+    const clientName = customer.name || "there";
+
+    const startRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+    const when = startRaw
+      ? formatToEastern(startRaw)
+      : { date: "today", time: "soon" };
+
+    const address = extractAddressFromAppointment(appt) || "the property address";
+
+    const message =
+      `Good morning ${clientName}! 👋\n` +
+      `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
+      `Location: ${address}\n` +
+      `Reply STOP to opt out.`;
+
+    const result = await sendSmrtPhoneSms({
+      from: SMRTPHONE_FROM_NUMBER,
+      to,
+      message,
+    });
+
+    if (!result.ok) {
+      return res
+        .status(500)
+        .send(`Failed to send SMS. Details: ${JSON.stringify(result)}`);
+    }
+
+    return res.send(
+      `✅ Sent live reminder SMS to test number ${to} for appt idx=${idx} (${todayEst}).`
+    );
+  } catch (err) {
+    console.error("💥 Error in /test-live-reminder:", err);
     return res.status(500).send("Server error");
   }
 });
