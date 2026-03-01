@@ -800,7 +800,7 @@ function buildMorningBriefingMessage(dateIso, appointments) {
       ? formatToEastern(startRaw)
       : { date: "unknown", time: "unknown" };
 
-    let propertyAddress = extractAddressFromAppointment(appt) || "Unknown address";
+    let propertyAddress = getSmsLocationLabel(appt) || "Unknown address";
 
     let shooterNames = [];
     if (Array.isArray(users) && users.length > 0) {
