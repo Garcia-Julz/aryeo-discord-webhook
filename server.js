@@ -10,8 +10,11 @@ const PORT = process.env.PORT || 3000;
 // ONE PLACE TO CHANGE THE DAILY SCHEDULE TIME
 // ---------------------------------------------------------
 // Change these to test (e.g. 18 / 35 for 6:35pm), then set back to 7 / 0 for 7:00am.
-const DAILY_JOB_HOUR_ET = parseInt(process.env.DAILY_JOB_HOUR_ET || "8", 10); // 0-23
-const DAILY_JOB_MINUTE_ET = parseInt(process.env.DAILY_JOB_MINUTE_ET || "30", 10); // 0-59
+const DAILY_JOB_HOUR_ET = parseInt(process.env.DAILY_JOB_HOUR_ET || "19", 10); // 0-23
+const DAILY_JOB_MINUTE_ET = parseInt(
+  process.env.DAILY_JOB_MINUTE_ET || "52",
+  10
+); // 0-59
 const CRON_TZ = "America/New_York";
 
 // Cron expression derived from the single time definition above.
@@ -581,8 +584,7 @@ function extractAddressFromObject(obj) {
     obj.state_code ||
     null;
 
-  let postal =
-    obj.postal_code || obj.zip || obj.zip_code || obj.postcode || null;
+  let postal = obj.postal_code || obj.zip || obj.zip_code || obj.postcode || null;
 
   if (!city || !state || !postal) {
     for (const [key, value] of Object.entries(obj)) {
@@ -693,6 +695,81 @@ function extractAddressFromAppointment(appt) {
   return null;
 }
 
+// ---------------------------------------------------------
+// CITY HELPERS (for SMS "Street, City")
+// ---------------------------------------------------------
+function extractCityFromObject(obj) {
+  if (!obj || typeof obj !== "object") return null;
+
+  const direct = obj.city || obj.locality || obj.town || obj.municipality || null;
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v !== "string") continue;
+    const key = k.toLowerCase();
+    if (key.includes("city") || key.includes("locality") || key.includes("town")) {
+      const val = v.trim();
+      if (val) return val;
+    }
+  }
+
+  return null;
+}
+
+function extractCityFromAppointment(appt) {
+  if (!appt) return null;
+  const order = appt.order || {};
+
+  const candidates = [
+    order.listing && order.listing.address,
+    order.listing,
+    order.address,
+    order,
+    appt.address,
+    appt.location,
+    appt.property,
+    appt,
+  ];
+
+  for (const obj of candidates) {
+    const city = extractCityFromObject(obj);
+    if (city) return city;
+  }
+
+  // Deep scan: find any object with a city-like field
+  const deepScan = (obj, depth = 0) => {
+    if (!obj || typeof obj !== "object" || depth > 8) return null;
+
+    const city = extractCityFromObject(obj);
+    if (city) return city;
+
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === "object") {
+        const found = deepScan(val, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
+  return deepScan({ appointment: appt, order });
+}
+
+// Ensures "Street, City" (does NOT force state/zip — just city like you asked)
+function getSmsLocationLabel(appt) {
+  const addr = extractAddressFromAppointment(appt);
+  const city = extractCityFromAppointment(appt);
+
+  if (!addr && !city) return "the property address";
+  if (addr && city) {
+    const addrLower = String(addr).toLowerCase();
+    const cityLower = String(city).toLowerCase();
+    if (addrLower.includes(cityLower)) return addr; // avoid duplicate
+    return `${addr}, ${city}`;
+  }
+  return addr || city;
+}
+
 // Build the Discord message for today's appointments
 function buildMorningBriefingMessage(dateIso, appointments) {
   const { date: prettyDate } = formatToEastern(`${dateIso}T00:00:00Z`);
@@ -723,8 +800,7 @@ function buildMorningBriefingMessage(dateIso, appointments) {
       ? formatToEastern(startRaw)
       : { date: "unknown", time: "unknown" };
 
-    let propertyAddress =
-      extractAddressFromAppointment(appt) || "Unknown address";
+    let propertyAddress = extractAddressFromAppointment(appt) || "Unknown address";
 
     let shooterNames = [];
     if (Array.isArray(users) && users.length > 0) {
@@ -880,12 +956,15 @@ async function sendClientRemindersForDate(
       ? formatToEastern(startRaw)
       : { date: targetDate, time: "soon" };
 
-    const address = extractAddressFromAppointment(appt) || "the property address";
+    // ✅ FIX: Use "Street, City" label for SMS
+    const address = getSmsLocationLabel(appt);
 
+    // ✅ Keep opt-out line (you had it before)
     const message =
       `Good morning ${clientName}! 👋\n` +
       `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
-      `Location: ${address}\n`;
+      `Location: ${address}\n` +
+      `Reply STOP to opt out.`;
 
     if (SMRTPHONE_DRY_RUN || forceDryRun) {
       console.log("🧪 DRY RUN: would send SMS:", {
@@ -968,10 +1047,15 @@ async function runDailyBriefingAndSms() {
 
   console.log("✅ Daily job summary:", {
     discordOk: !!(discordResult && discordResult.ok),
-    discordCount: discordResult && typeof discordResult.count === "number" ? discordResult.count : null,
+    discordCount:
+      discordResult && typeof discordResult.count === "number"
+        ? discordResult.count
+        : null,
     smsSent: smsResult && typeof smsResult.sent === "number" ? smsResult.sent : null,
-    smsSkipped: smsResult && typeof smsResult.skipped === "number" ? smsResult.skipped : null,
-    smsFailed: smsResult && typeof smsResult.failed === "number" ? smsResult.failed : null,
+    smsSkipped:
+      smsResult && typeof smsResult.skipped === "number" ? smsResult.skipped : null,
+    smsFailed:
+      smsResult && typeof smsResult.failed === "number" ? smsResult.failed : null,
     smsAppointmentsFound:
       smsResult && typeof smsResult.appointmentsFound === "number"
         ? smsResult.appointmentsFound
@@ -1038,8 +1122,7 @@ async function handleOrderCreated(activity) {
 
     if (Array.isArray(order.appointments) && order.appointments.length > 0) {
       const appt = order.appointments[0];
-      const appointmentRaw =
-        appt.start_at || appt.scheduled_at || appt.date || null;
+      const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
 
       if (appointmentRaw && typeof appointmentRaw === "string") {
         const formatted = formatToEastern(appointmentRaw);
@@ -1084,8 +1167,7 @@ async function handleOrderCreated(activity) {
     return;
   }
 
-  const orderLabel =
-    (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+  const orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   let lines = [];
   lines.push("🚁 **New Drone Order – Airspace Check Needed**");
@@ -1101,9 +1183,7 @@ async function handleOrderCreated(activity) {
 
   if (photographerNames.length > 0) {
     const label =
-      photographerNames.length === 1
-        ? photographerNames[0]
-        : photographerNames.join(", ");
+      photographerNames.length === 1 ? photographerNames[0] : photographerNames.join(", ");
     lines.push(`• Photographer: \`${label}\``);
   }
 
@@ -1259,8 +1339,7 @@ async function handleOrderPaymentReceived(activity) {
     }
   }
 
-  const label =
-    (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+  const label = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   if (!orderStatusUrl) {
     orderStatusUrl = `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
@@ -1325,12 +1404,10 @@ async function handleOrderCanceled(activity) {
     }
   }
 
-  const label =
-    (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+  const label = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   const when = formatToEastern(occurred_at);
-  const reason =
-    activity.reason || (activity.metadata && activity.metadata.reason) || null;
+  const reason = activity.reason || (activity.metadata && activity.metadata.reason) || null;
 
   let lines = [];
   lines.push("❌ **Order Cancelled**");
@@ -1363,8 +1440,7 @@ async function handleAppointmentRescheduled(activity) {
       const orderNumber = order.number || null;
       const orderTitle = order.title || order.identifier || orderId;
 
-      orderLabel =
-        (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+      orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
       if (order.customer && order.customer.name) customerName = order.customer.name;
 
@@ -1431,8 +1507,7 @@ async function handlePhotographerAssignmentChanged(activity) {
 
   if (resource?.user) {
     const u = resource.user;
-    const userName =
-      u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
+    const userName = u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
     if (userName) {
       shooterNames.push(userName);
       const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
@@ -1440,8 +1515,7 @@ async function handlePhotographerAssignmentChanged(activity) {
     }
   } else if (Array.isArray(resource?.users)) {
     resource.users.forEach((u) => {
-      const userName =
-        u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
+      const userName = u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
       if (userName) {
         shooterNames.push(userName);
         const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
@@ -1476,8 +1550,7 @@ async function handlePhotographerAssignmentChanged(activity) {
         order.payment_url ||
         `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit`;
 
-      orderLabel =
-        (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+      orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
       if (order.customer && order.customer.name) customerName = order.customer.name;
 
@@ -1566,8 +1639,7 @@ async function handlePhotographerAssignmentChanged(activity) {
   }
 
   if (shooterNames.length > 0) {
-    const shootersLabel =
-      shooterNames.length === 1 ? shooterNames[0] : shooterNames.join(", ");
+    const shootersLabel = shooterNames.length === 1 ? shooterNames[0] : shooterNames.join(", ");
     lines.push("");
     lines.push(`• Photographer(s) ${direction} appointment: \`${shootersLabel}\``);
   } else {
@@ -1670,8 +1742,7 @@ app.get("/test-daily-job-now", async (req, res) => {
   try {
     const result = await runDailyBriefingAndSms();
     return res.status(200).send(
-      `✅ Ran daily job now (Discord + SMS)\n` +
-        JSON.stringify(result, null, 2)
+      `✅ Ran daily job now (Discord + SMS)\n` + JSON.stringify(result, null, 2)
     );
   } catch (err) {
     console.error("💥 Error in /test-daily-job-now:", err);
@@ -1796,7 +1867,9 @@ app.get("/test-drone", async (req, res) => {
 app.get("/test-quickbooks", async (req, res) => {
   await sendToDiscord(
     QUICKBOOKS_WEBHOOK_URL,
-    { content: "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`" },
+    {
+      content: "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`",
+    },
     "QB-TEST"
   );
   res.send("Sent test message to QuickBooks Discord webhook (if configured).");
