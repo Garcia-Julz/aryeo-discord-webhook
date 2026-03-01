@@ -6,6 +6,17 @@ const cron = require("node-cron");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ---------------------------------------------------------
+// ONE PLACE TO CHANGE THE DAILY SCHEDULE TIME
+// ---------------------------------------------------------
+// Change these to test (e.g. 18 / 35 for 6:35pm), then set back to 7 / 0 for 7:00am.
+const DAILY_JOB_HOUR_ET = parseInt(process.env.DAILY_JOB_HOUR_ET || "19", 10); // 0-23
+const DAILY_JOB_MINUTE_ET = parseInt(process.env.DAILY_JOB_MINUTE_ET || "15", 10); // 0-59
+const CRON_TZ = "America/New_York";
+
+// Cron expression derived from the single time definition above.
+const DAILY_CRON_EXPR = `${DAILY_JOB_MINUTE_ET} ${DAILY_JOB_HOUR_ET} * * *`;
+
 // --- PHONE DISPLAY (Discord) ---
 // Safer default: mask phone in Discord logs
 const SHOW_FULL_CLIENT_PHONE_IN_DISCORD =
@@ -45,6 +56,11 @@ const PHOTOGRAPHER_DISCORD_MAP = {
   "Que Mckenzie": "<@242693007453847552>",
 };
 
+console.log("Boot: TIMEZONE =", CRON_TZ);
+console.log("Boot: DAILY_JOB_HOUR_ET =", DAILY_JOB_HOUR_ET);
+console.log("Boot: DAILY_JOB_MINUTE_ET =", DAILY_JOB_MINUTE_ET);
+console.log("Boot: DAILY_CRON_EXPR =", DAILY_CRON_EXPR);
+
 console.log("Boot: ARYEO_WEBHOOK_SECRET present?", !!ARYEO_WEBHOOK_SECRET);
 console.log("Boot: ARYEO_API_KEY present?", !!ARYEO_API_KEY);
 console.log("Boot: DRONE_WEBHOOK_URL present?", !!DRONE_WEBHOOK_URL);
@@ -81,6 +97,15 @@ function verifyAryeoSignature(rawBody, signatureHeader) {
 // SHARED HELPERS
 // ---------------------------------------------------------
 
+function getEasternTodayYMD(dateObj = new Date()) {
+  return dateObj.toLocaleDateString("en-CA", {
+    timeZone: CRON_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
 // Format ISO date/time to US Eastern
 function formatToEastern(isoString) {
   if (!isoString) {
@@ -93,14 +118,14 @@ function formatToEastern(isoString) {
   }
 
   const dateFormatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
+    timeZone: CRON_TZ,
     year: "numeric",
     month: "short",
     day: "2-digit",
   });
 
   const timeFormatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
+    timeZone: CRON_TZ,
     hour: "numeric",
     minute: "2-digit",
   });
@@ -119,7 +144,7 @@ function getEasternYMD(isoString) {
   if (isNaN(d.getTime())) return null;
 
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "America/New_York",
+    timeZone: CRON_TZ,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -138,7 +163,7 @@ async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
     console.error(
       `❌ Missing Discord webhook URL for [${contextLabel || "notification"}]`
     );
-    return;
+    return { ok: false, error: "Missing webhook URL" };
   }
 
   const body = typeof payload === "string" ? { content: payload } : payload;
@@ -154,9 +179,12 @@ async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
     if (!resp.ok) {
       const text = await resp.text();
       console.error("❌ Discord error response:", text);
+      return { ok: false, status: resp.status, body: text };
     }
+    return { ok: true, status: resp.status };
   } catch (err) {
     console.error(`❌ Error sending to Discord [${contextLabel}]:`, err);
+    return { ok: false, error: String(err) };
   }
 }
 
@@ -569,7 +597,10 @@ function extractAddressFromObject(obj) {
         (k.includes("state") || k.includes("province") || k.includes("region"))
       )
         state = v;
-      else if (!postal && (k.includes("postal") || k.includes("zip") || k.includes("postcode")))
+      else if (
+        !postal &&
+        (k.includes("postal") || k.includes("zip") || k.includes("postcode"))
+      )
         postal = v;
     }
   }
@@ -698,7 +729,9 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     let shooterNames = [];
     if (Array.isArray(users) && users.length > 0) {
       shooterNames = users
-        .map((u) => u.name || [u.first_name, u.last_name].filter(Boolean).join(" "))
+        .map(
+          (u) => u.name || [u.first_name, u.last_name].filter(Boolean).join(" ")
+        )
         .filter(Boolean);
     }
 
@@ -716,7 +749,9 @@ function buildMorningBriefingMessage(dateIso, appointments) {
       } else if (names.length > 1) {
         const firstFew = names.slice(0, 3).join(", ");
         serviceSummary =
-          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
+          names.length > 3
+            ? `${firstFew} (+${names.length - 3} more)`
+            : firstFew;
       }
     }
 
@@ -750,39 +785,202 @@ function buildMorningBriefingMessage(dateIso, appointments) {
 
 // Main function to send the morning briefing
 async function sendMorningBriefing(dateOverrideIso) {
-  let todayEst;
-  if (dateOverrideIso) {
-    todayEst = dateOverrideIso;
-  } else {
-    const now = new Date();
-    const estDateStr = now.toLocaleDateString("en-CA", {
-      timeZone: "America/New_York",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    });
-    todayEst = estDateStr;
-  }
-
+  const todayEst = dateOverrideIso || getEasternTodayYMD();
   console.log("📅 Sending morning briefing for date:", todayEst);
 
   const appointments = await fetchAppointmentsForDate(todayEst);
   if (!appointments) {
     console.log("⚠️ No appointments data returned, skipping Discord send.");
-    return { date: todayEst, count: 0 };
+    return { ok: false, date: todayEst, count: 0, reason: "No appointments data" };
   }
 
   const content = buildMorningBriefingMessage(todayEst, appointments);
+  console.log("➡️ Morning briefing Discord payload length:", content.length);
 
-  console.log("➡️ Morning briefing Discord payload:", content);
-
-  await sendToDiscord(
+  const resp = await sendToDiscord(
     BOOKINGS_WEBHOOK_URL,
     { content },
     "BOOKINGS-MORNING_BRIEFING"
   );
 
-  return { date: todayEst, count: appointments.length };
+  return { ok: !!resp.ok, date: todayEst, count: appointments.length, discord: resp };
+}
+
+// ---------------------------------------------------------
+// SMS: Send reminders to clients for a given Eastern date
+// ---------------------------------------------------------
+async function sendClientRemindersForDate(
+  targetDate,
+  { limit = 0, idxOnly = null, forceDryRun = false } = {}
+) {
+  // IMPORTANT: don't kill the whole cron if env is missing—return a clean result instead.
+  if (!SMRTPHONE_FROM_NUMBER) {
+    console.error("❌ Missing SMRTPHONE_FROM_NUMBER env var (SMS will not send).");
+    return {
+      targetDate,
+      appointmentsFound: 0,
+      sent: 0,
+      skipped: 0,
+      failed: 0,
+      error: "Missing SMRTPHONE_FROM_NUMBER",
+      results: [],
+    };
+  }
+
+  const appointments = (await fetchAppointmentsForDate(targetDate)) || [];
+  if (appointments.length === 0) {
+    return {
+      targetDate,
+      appointmentsFound: 0,
+      sent: 0,
+      skipped: 0,
+      failed: 0,
+      results: [],
+    };
+  }
+
+  const listToSend =
+    idxOnly !== null
+      ? [appointments[Math.min(idxOnly, appointments.length - 1)]]
+      : appointments;
+
+  const trimmed =
+    limit > 0 ? listToSend.slice(0, Math.min(limit, listToSend.length)) : listToSend;
+
+  console.log(
+    `📲 sendClientRemindersForDate: date=${targetDate} found=${appointments.length} willSend=${trimmed.length} dryRun=${SMRTPHONE_DRY_RUN || forceDryRun}`
+  );
+
+  let sent = 0;
+  let skipped = 0;
+  let failed = 0;
+  const results = [];
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const appt = trimmed[i];
+    const order = appt.order || {};
+    const customer = order.customer || {};
+
+    const clientName = customer.name || "there";
+    const to = getClientPhoneDigits(customer);
+
+    if (!to) {
+      skipped++;
+      results.push({
+        ok: false,
+        reason: "No client phone found on order.customer",
+        clientName,
+        orderId: order.id || null,
+      });
+      continue;
+    }
+
+    const startRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+    const when = startRaw
+      ? formatToEastern(startRaw)
+      : { date: targetDate, time: "soon" };
+
+    const address = extractAddressFromAppointment(appt) || "the property address";
+
+    const message =
+      `Good morning ${clientName}! 👋\n` +
+      `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
+      `Location: ${address}\n` +
+      `Reply STOP to opt out.`;
+
+    if (SMRTPHONE_DRY_RUN || forceDryRun) {
+      console.log("🧪 DRY RUN: would send SMS:", {
+        to,
+        from: SMRTPHONE_FROM_NUMBER,
+        message,
+      });
+      sent++;
+      results.push({
+        ok: true,
+        dryRun: true,
+        to,
+        clientName,
+        orderId: order.id || null,
+      });
+      continue;
+    }
+
+    const result = await sendSmrtPhoneSms({
+      from: SMRTPHONE_FROM_NUMBER,
+      to,
+      message,
+    });
+
+    if (!result.ok) {
+      failed++;
+      results.push({
+        ok: false,
+        to,
+        clientName,
+        orderId: order.id || null,
+        error: result,
+      });
+      continue;
+    }
+
+    sent++;
+    results.push({ ok: true, to, clientName, orderId: order.id || null });
+  }
+
+  return {
+    targetDate,
+    appointmentsFound: appointments.length,
+    sent,
+    skipped,
+    failed,
+    results,
+  };
+}
+
+// ---------------------------------------------------------
+// DAILY JOB WRAPPER (keeps Discord + SMS separate but same time)
+// ---------------------------------------------------------
+async function runDailyBriefingAndSms() {
+  const targetDate = getEasternTodayYMD();
+  console.log("⏰ Daily job fired:", {
+    cron: DAILY_CRON_EXPR,
+    timezone: CRON_TZ,
+    targetDate,
+    nowIso: new Date().toISOString(),
+  });
+
+  // Run Discord + SMS independently so one failure doesn't block the other.
+  let discordResult = null;
+  let smsResult = null;
+
+  try {
+    discordResult = await sendMorningBriefing(targetDate);
+  } catch (err) {
+    console.error("💥 Daily job: Discord briefing failed:", err);
+    discordResult = { ok: false, error: String(err) };
+  }
+
+  try {
+    smsResult = await sendClientRemindersForDate(targetDate);
+  } catch (err) {
+    console.error("💥 Daily job: SMS reminders failed:", err);
+    smsResult = { ok: false, error: String(err) };
+  }
+
+  console.log("✅ Daily job summary:", {
+    discordOk: !!(discordResult && discordResult.ok),
+    discordCount: discordResult && typeof discordResult.count === "number" ? discordResult.count : null,
+    smsSent: smsResult && typeof smsResult.sent === "number" ? smsResult.sent : null,
+    smsSkipped: smsResult && typeof smsResult.skipped === "number" ? smsResult.skipped : null,
+    smsFailed: smsResult && typeof smsResult.failed === "number" ? smsResult.failed : null,
+    smsAppointmentsFound:
+      smsResult && typeof smsResult.appointmentsFound === "number"
+        ? smsResult.appointmentsFound
+        : null,
+    smsError: smsResult && smsResult.error ? smsResult.error : null,
+  });
+
+  return { discordResult, smsResult, targetDate };
 }
 
 // ---------------------------------------------------------
@@ -826,13 +1024,9 @@ async function handleOrderCreated(activity) {
       customerName = order.customer.name;
     }
 
-    if (
-      order.listing &&
-      order.listing.address &&
-      order.listing.address.full_address
-    ) {
+    if (order.listing?.address?.full_address) {
       propertyAddress = order.listing.address.full_address;
-    } else if (order.address && order.address.full_address) {
+    } else if (order.address?.full_address) {
       propertyAddress = order.address.full_address;
     } else {
       const deepAddr = findAnyFullAddress(order);
@@ -857,9 +1051,7 @@ async function handleOrderCreated(activity) {
       if (Array.isArray(appt.users) && appt.users.length > 0) {
         appt.users.forEach((u) => {
           const userName =
-            u.name ||
-            [u.first_name, u.last_name].filter(Boolean).join(" ") ||
-            null;
+            u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
 
           if (userName) {
             photographerNames.push(userName);
@@ -897,7 +1089,6 @@ async function handleOrderCreated(activity) {
     (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   let lines = [];
-
   lines.push("🚁 **New Drone Order – Airspace Check Needed**");
   lines.push("");
 
@@ -1178,7 +1369,8 @@ async function handleAppointmentRescheduled(activity) {
 
       if (order.customer && order.customer.name) customerName = order.customer.name;
 
-      if (order.listing?.address?.full_address) propertyAddress = order.listing.address.full_address;
+      if (order.listing?.address?.full_address)
+        propertyAddress = order.listing.address.full_address;
       else if (order.address?.full_address) propertyAddress = order.address.full_address;
 
       if (propertyAddress && propertyAddress !== "unknown") {
@@ -1260,9 +1452,7 @@ async function handlePhotographerAssignmentChanged(activity) {
   }
 
   const direction =
-    name && name.toUpperCase().includes("UNASSIGN")
-      ? "unassigned from"
-      : "assigned to";
+    name && name.toUpperCase().includes("UNASSIGN") ? "unassigned from" : "assigned to";
 
   let orderLabel = orderId || "unknown";
   let orderNumber = null;
@@ -1292,7 +1482,8 @@ async function handlePhotographerAssignmentChanged(activity) {
 
       if (order.customer && order.customer.name) customerName = order.customer.name;
 
-      if (order.listing?.address?.full_address) propertyAddress = order.listing.address.full_address;
+      if (order.listing?.address?.full_address)
+        propertyAddress = order.listing.address.full_address;
       else if (order.address?.full_address) propertyAddress = order.address.full_address;
 
       if (propertyAddress && propertyAddress !== "unknown") {
@@ -1316,7 +1507,9 @@ async function handlePhotographerAssignmentChanged(activity) {
       let appt = null;
       if (Array.isArray(order.appointments) && order.appointments.length > 0) {
         if (appointmentId) {
-          appt = order.appointments.find((a) => a.id === appointmentId) || order.appointments[0];
+          appt =
+            order.appointments.find((a) => a.id === appointmentId) ||
+            order.appointments[0];
         } else {
           appt = order.appointments[0];
         }
@@ -1453,43 +1646,44 @@ app.post("/aryeo-webhook", async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// Cron Jobs
+// CRON JOBS (uses the single time definition above)
 // ---------------------------------------------------------
-
-// Run every day at 7:00 AM Eastern
 cron.schedule(
-  "23 18 * * *",
-  () => {
-    console.log("⏰ Running daily morning briefing...");
-    sendMorningBriefing().catch((err) => {
-      console.error("💥 Error in sendMorningBriefing:", err);
-    });
+  DAILY_CRON_EXPR,
+  async () => {
+    await runDailyBriefingAndSms();
   },
-  {
-    timezone: "America/New_York",
-  }
+  { timezone: CRON_TZ }
 );
 
 // ---------------------------------------------------------
 // SIMPLE TEST ROUTES
 // ---------------------------------------------------------
 
+// Runs BOTH Discord + SMS immediately (no schedule)
+// Protect it with the same token you already use for SMS tests.
+app.get("/test-daily-job-now", async (req, res) => {
+  const token = req.query.token || "";
+  if (!SMRTPHONE_TEST_TOKEN || token !== SMRTPHONE_TEST_TOKEN) {
+    return res.status(401).send("Unauthorized");
+  }
+
+  try {
+    const result = await runDailyBriefingAndSms();
+    return res.status(200).send(
+      `✅ Ran daily job now (Discord + SMS)\n` +
+        JSON.stringify(result, null, 2)
+    );
+  } catch (err) {
+    console.error("💥 Error in /test-daily-job-now:", err);
+    return res.status(500).send("Server error");
+  }
+});
+
+// Discord-only test
 app.get("/test-morning-briefing", async (req, res) => {
   try {
-    const now = new Date();
-    const estParts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "America/New_York",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(now);
-
-    const year = estParts.find((p) => p.type === "year").value;
-    const month = estParts.find((p) => p.type === "month").value;
-    const day = estParts.find((p) => p.type === "day").value;
-
-    const todayEst = `${year}-${month}-${day}`;
-
+    const todayEst = getEasternTodayYMD();
     const appointments = (await fetchAppointmentsForDate(todayEst)) || [];
     const content = buildMorningBriefingMessage(todayEst, appointments);
 
@@ -1508,6 +1702,7 @@ app.get("/test-morning-briefing", async (req, res) => {
   }
 });
 
+// SMS-only test (single test number)
 app.get("/test-smrtphone", async (req, res) => {
   try {
     const token = req.query.token || "";
@@ -1561,35 +1756,11 @@ app.get("/ping-todays-clients", async (req, res) => {
       return res.status(401).send("Unauthorized");
     }
 
-    if (!SMRTPHONE_FROM_NUMBER) {
-      return res.status(500).send("Missing SMRTPHONE_FROM_NUMBER env var");
-    }
-
     // Date selection (Eastern)
     let targetDate = (req.query.date && String(req.query.date)) || null;
-    if (!targetDate) {
-      const now = new Date();
-      const parts = new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/New_York",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).formatToParts(now);
+    if (!targetDate) targetDate = getEasternTodayYMD();
 
-      const year = parts.find((p) => p.type === "year").value;
-      const month = parts.find((p) => p.type === "month").value;
-      const day = parts.find((p) => p.type === "day").value;
-      targetDate = `${year}-${month}-${day}`;
-    }
-
-    const appointments = (await fetchAppointmentsForDate(targetDate)) || [];
-    if (appointments.length === 0) {
-      return res.status(200).send(`No appointments found for ${targetDate}`);
-    }
-
-    const forceDryRun =
-      String(req.query.dryRun || "").toLowerCase() === "true";
-
+    const forceDryRun = String(req.query.dryRun || "").toLowerCase() === "true";
     const limit = Math.max(0, parseInt(req.query.limit || "0", 10) || 0);
     const idxOnlyRaw = req.query.idx;
     const idxOnly =
@@ -1597,98 +1768,15 @@ app.get("/ping-todays-clients", async (req, res) => {
         ? null
         : Math.max(0, parseInt(String(idxOnlyRaw), 10) || 0);
 
-    let sent = 0;
-    let skipped = 0;
-    let failed = 0;
-
-    const results = [];
-
-    const listToSend =
-      idxOnly !== null
-        ? [appointments[Math.min(idxOnly, appointments.length - 1)]]
-        : appointments;
-
-    const trimmed =
-      limit > 0 ? listToSend.slice(0, Math.min(limit, listToSend.length)) : listToSend;
-
-    console.log(
-      `📲 ping-todays-clients: date=${targetDate} appts=${appointments.length} willSend=${trimmed.length} dryRun=${SMRTPHONE_DRY_RUN || forceDryRun}`
-    );
-
-    for (let i = 0; i < trimmed.length; i++) {
-      const appt = trimmed[i];
-      const order = appt.order || {};
-      const customer = order.customer || {};
-
-      const clientName = customer.name || "there";
-      const to = getClientPhoneDigits(customer);
-
-      if (!to) {
-        skipped++;
-        results.push({
-          ok: false,
-          reason: "No client phone found on order.customer",
-          clientName,
-          orderId: order.id || null,
-        });
-        continue;
-      }
-
-      const startRaw = appt.start_at || appt.scheduled_at || appt.date || null;
-      const when = startRaw
-        ? formatToEastern(startRaw)
-        : { date: targetDate, time: "soon" };
-
-      const address =
-        extractAddressFromAppointment(appt) || "the property address";
-
-      const message =
-        `Good morning ${clientName}! 👋\n` +
-        `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
-        `Location: ${address}\n` +
-        `Reply STOP to opt out.`;
-
-      if (forceDryRun) {
-        console.log("🧪 force dryRun=true; would send:", { to, from: SMRTPHONE_FROM_NUMBER, message });
-        sent++;
-        results.push({ ok: true, dryRun: true, to, clientName, orderId: order.id || null });
-        continue;
-      }
-
-      const result = await sendSmrtPhoneSms({
-        from: SMRTPHONE_FROM_NUMBER,
-        to,
-        message,
-      });
-
-      if (!result.ok) {
-        failed++;
-        results.push({
-          ok: false,
-          to,
-          clientName,
-          orderId: order.id || null,
-          error: result,
-        });
-        continue;
-      }
-
-      sent++;
-      results.push({
-        ok: true,
-        to,
-        clientName,
-        orderId: order.id || null,
-      });
-    }
+    const smsResult = await sendClientRemindersForDate(targetDate, {
+      limit,
+      idxOnly,
+      forceDryRun,
+    });
 
     return res.status(200).send(
-      `✅ ping-todays-clients complete for ${targetDate}\n` +
-        `Appointments found: ${appointments.length}\n` +
-        `Sent: ${sent}\n` +
-        `Skipped (no phone): ${skipped}\n` +
-        `Failed: ${failed}\n\n` +
-        `Details:\n${JSON.stringify(results, null, 2)}`
+      `✅ ping-todays-clients complete for ${targetDate}\n\n` +
+        JSON.stringify(smsResult, null, 2)
     );
   } catch (err) {
     console.error("💥 Error in /ping-todays-clients:", err);
@@ -1696,87 +1784,7 @@ app.get("/ping-todays-clients", async (req, res) => {
   }
 });
 
-// ✅ (kept) LIVE APPOINTMENT SMS TEST (now also sends to REAL client phones)
-// URL:
-// https://YOUR-RAILWAY-DOMAIN/test-live-reminder?token=YOUR_TEST_TOKEN
-// Optional: ?idx=0 (pick appointment by index)
-app.get("/test-live-reminder", async (req, res) => {
-  try {
-    const token = req.query.token || "";
-    if (!SMRTPHONE_TEST_TOKEN || token !== SMRTPHONE_TEST_TOKEN) {
-      return res.status(401).send("Unauthorized");
-    }
-
-    if (!SMRTPHONE_FROM_NUMBER) {
-      return res.status(500).send("Missing SMRTPHONE_FROM_NUMBER env var");
-    }
-
-    const now = new Date();
-    const estParts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "America/New_York",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).formatToParts(now);
-
-    const year = estParts.find((p) => p.type === "year").value;
-    const month = estParts.find((p) => p.type === "month").value;
-    const day = estParts.find((p) => p.type === "day").value;
-    const todayEst = `${year}-${month}-${day}`;
-
-    const appointments = (await fetchAppointmentsForDate(todayEst)) || [];
-    if (appointments.length === 0) {
-      return res.status(200).send(`No appointments found for ${todayEst}`);
-    }
-
-    const idx = Math.max(0, parseInt(req.query.idx || "0", 10) || 0);
-    const appt = appointments[Math.min(idx, appointments.length - 1)];
-
-    const order = appt.order || {};
-    const customer = order.customer || {};
-    const clientName = customer.name || "there";
-
-    const to = getClientPhoneDigits(customer);
-    if (!to) {
-      return res
-        .status(200)
-        .send(`Found appointment, but no client phone was found on the booking (idx=${idx}).`);
-    }
-
-    const startRaw = appt.start_at || appt.scheduled_at || appt.date || null;
-    const when = startRaw
-      ? formatToEastern(startRaw)
-      : { date: "today", time: "soon" };
-
-    const address = extractAddressFromAppointment(appt) || "the property address";
-
-    const message =
-      `Good morning ${clientName}! 👋\n` +
-      `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
-      `Location: ${address}\n` +
-      `Reply STOP to opt out.`;
-
-    const result = await sendSmrtPhoneSms({
-      from: SMRTPHONE_FROM_NUMBER,
-      to,
-      message,
-    });
-
-    if (!result.ok) {
-      return res
-        .status(500)
-        .send(`Failed to send SMS. Details: ${JSON.stringify(result)}`);
-    }
-
-    return res.send(
-      `✅ Sent live reminder SMS to CLIENT ${to} for appt idx=${idx} (${todayEst}).`
-    );
-  } catch (err) {
-    console.error("💥 Error in /test-live-reminder:", err);
-    return res.status(500).send("Server error");
-  }
-});
-
+// Discord channel tests
 app.get("/test-drone", async (req, res) => {
   await sendToDiscord(
     DRONE_WEBHOOK_URL,
@@ -1806,7 +1814,10 @@ app.get("/test-bookings", async (req, res) => {
 
 // Root sanity route
 app.get("/", (req, res) => {
-  res.send("Aryeo → Discord webhook is running.");
+  res.send(
+    "Aryeo → Discord webhook is running. " +
+      `Daily cron: ${DAILY_CRON_EXPR} (${CRON_TZ})`
+  );
 });
 
 app.listen(PORT, () => {
