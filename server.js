@@ -10,9 +10,9 @@ const PORT = process.env.PORT || 3000;
 // ONE PLACE TO CHANGE THE DAILY SCHEDULE TIME
 // ---------------------------------------------------------
 // Change these to test (e.g. 18 / 35 for 6:35pm), then set back to 7 / 0 for 7:00am.
-const DAILY_JOB_HOUR_ET = parseInt(process.env.DAILY_JOB_HOUR_ET || "19", 10); // 0-23
+const DAILY_JOB_HOUR_ET = parseInt(process.env.DAILY_JOB_HOUR_ET || "8", 10); // 0-23
 const DAILY_JOB_MINUTE_ET = parseInt(
-  process.env.DAILY_JOB_MINUTE_ET || "52",
+  process.env.DAILY_JOB_MINUTE_ET || "0",
   10
 ); // 0-59
 const CRON_TZ = "America/New_York";
@@ -961,10 +961,9 @@ async function sendClientRemindersForDate(
 
     // ✅ Keep opt-out line (you had it before)
     const message =
-      `Good morning ${clientName}! 👋\n` +
+      `Good morning ${clientName}!\n` +
       `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
-      `Location: ${address}\n` +
-      `Reply STOP to opt out.`;
+      `Location: ${address}\n`;
 
     if (SMRTPHONE_DRY_RUN || forceDryRun) {
       console.log("🧪 DRY RUN: would send SMS:", {
