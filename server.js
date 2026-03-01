@@ -885,8 +885,7 @@ async function sendClientRemindersForDate(
     const message =
       `Good morning ${clientName}! 👋\n` +
       `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
-      `Location: ${address}\n` +
-      `Reply STOP to opt out.`;
+      `Location: ${address}\n`;
 
     if (SMRTPHONE_DRY_RUN || forceDryRun) {
       console.log("🧪 DRY RUN: would send SMS:", {
