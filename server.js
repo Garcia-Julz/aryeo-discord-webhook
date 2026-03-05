@@ -9,21 +9,18 @@ const PORT = process.env.PORT || 3000;
 // ---------------------------------------------------------
 // ONE PLACE TO CHANGE THE DAILY SCHEDULE TIME
 // ---------------------------------------------------------
-// Change these to test (e.g. 18 / 35 for 6:35pm), then set back to 7 / 0 for 7:00am.
 const DAILY_JOB_HOUR_ET = parseInt(process.env.DAILY_JOB_HOUR_ET || "8", 10); // 0-23
-const DAILY_JOB_MINUTE_ET = parseInt(
-  process.env.DAILY_JOB_MINUTE_ET || "0",
-  10
-); // 0-59
+const DAILY_JOB_MINUTE_ET = parseInt(process.env.DAILY_JOB_MINUTE_ET || "0", 10); // 0-59
 const CRON_TZ = "America/New_York";
-
-// Cron expression derived from the single time definition above.
 const DAILY_CRON_EXPR = `${DAILY_JOB_MINUTE_ET} ${DAILY_JOB_HOUR_ET} * * *`;
 
 // --- PHONE DISPLAY (Discord) ---
-// Safer default: mask phone in Discord logs
 const SHOW_FULL_CLIENT_PHONE_IN_DISCORD =
-  (process.env.SHOW_FULL_CLIENT_PHONE_IN_DISCORD || "").toLowerCase() === "true"; // set env var true to show full phone
+  (process.env.SHOW_FULL_CLIENT_PHONE_IN_DISCORD || "").toLowerCase() === "true";
+
+// --- OPTIONAL DEBUG ---
+const DEBUG_CANCELED_FILTER =
+  (process.env.DEBUG_CANCELED_FILTER || "").toLowerCase() === "true";
 
 // --- ENV VARS ---
 // --- SMRTPHONE (SMS) ---
@@ -53,7 +50,6 @@ const BOOKINGS_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL_BOOKINGS;
 const DRONE_MENTION = process.env.DRONE_MENTION || "@DronePilot";
 
 // Map Aryeo user names -> Discord mentions
-// Make sure these match *exactly* how Aryeo returns the name.
 const PHOTOGRAPHER_DISCORD_MAP = {
   "Julian Garcia": "<@294642333352198148>",
   "Que Mckenzie": "<@242693007453847552>",
@@ -80,8 +76,9 @@ console.log(
   "Boot: SHOW_FULL_CLIENT_PHONE_IN_DISCORD =",
   SHOW_FULL_CLIENT_PHONE_IN_DISCORD
 );
+console.log("Boot: DEBUG_CANCELED_FILTER =", DEBUG_CANCELED_FILTER);
 
-// --- BODY PARSER (keep rawBody in case we later validate signatures) ---
+// --- BODY PARSER ---
 app.use(
   express.json({
     verify: (req, res, buf) => {
@@ -111,14 +108,10 @@ function getEasternTodayYMD(dateObj = new Date()) {
 
 // Format ISO date/time to US Eastern
 function formatToEastern(isoString) {
-  if (!isoString) {
-    return { date: "unknown", time: "unknown" };
-  }
+  if (!isoString) return { date: "unknown", time: "unknown" };
 
   const d = new Date(isoString);
-  if (isNaN(d.getTime())) {
-    return { date: "unknown", time: "unknown" };
-  }
+  if (isNaN(d.getTime())) return { date: "unknown", time: "unknown" };
 
   const dateFormatter = new Intl.DateTimeFormat("en-US", {
     timeZone: CRON_TZ,
@@ -134,8 +127,8 @@ function formatToEastern(isoString) {
   });
 
   return {
-    date: dateFormatter.format(d), // e.g. "Dec 04, 2025"
-    time: timeFormatter.format(d) + " ET", // e.g. "9:30 AM ET"
+    date: dateFormatter.format(d),
+    time: timeFormatter.format(d) + " ET",
   };
 }
 
@@ -158,7 +151,7 @@ function getEasternYMD(isoString) {
   const day = parts.find((p) => p.type === "day")?.value;
 
   if (!year || !month || !day) return null;
-  return `${year}-${month}-${day}`; // YYYY-MM-DD
+  return `${year}-${month}-${day}`;
 }
 
 async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
@@ -197,7 +190,63 @@ function buildGoogleMapsUrl(addressString) {
   return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
-// --- SMRTPHONE helper ---
+// ---------------------------------------------------------
+// CANCEL / STATUS FILTER (NEW)
+// ---------------------------------------------------------
+
+function looksCanceledStatus_(val) {
+  const s = String(val || "").toLowerCase().trim();
+  if (!s) return false;
+  // handles: canceled, cancelled, cancel, cancelled_at, etc
+  return s.includes("cancel") || s.includes("void");
+}
+
+function isCanceledAppointmentOrOrder_(appt) {
+  if (!appt || typeof appt !== "object") return false;
+
+  const order = appt.order || appt.order_data || appt.orderData || {};
+
+  const apptCanceledFlag =
+    !!(
+      appt.cancelled_at ||
+      appt.canceled_at ||
+      appt.cancelledAt ||
+      appt.canceledAt ||
+      appt.cancellation_at ||
+      appt.cancellationAt
+    );
+
+  const orderCanceledFlag =
+    !!(
+      order.cancelled_at ||
+      order.canceled_at ||
+      order.cancelledAt ||
+      order.canceledAt ||
+      order.cancellation_at ||
+      order.cancellationAt
+    );
+
+  const apptStatusCanceled = looksCanceledStatus_(appt.status);
+  const orderStatusCanceled = looksCanceledStatus_(order.status);
+
+  // Some APIs include "state"
+  const apptStateCanceled = looksCanceledStatus_(appt.state);
+  const orderStateCanceled = looksCanceledStatus_(order.state);
+
+  return (
+    apptCanceledFlag ||
+    orderCanceledFlag ||
+    apptStatusCanceled ||
+    orderStatusCanceled ||
+    apptStateCanceled ||
+    orderStateCanceled
+  );
+}
+
+// ---------------------------------------------------------
+// SMRTPHONE helper
+// ---------------------------------------------------------
+
 async function sendSmrtPhoneSms({ from, to, message }) {
   if (!SMRTPHONE_API_KEY) {
     console.error("❌ Missing SMRTPHONE_API_KEY");
@@ -262,11 +311,9 @@ function normalizePhoneString(raw) {
   return cleaned ? cleaned : null;
 }
 
-// Try lots of likely field names + also scan keys that contain "phone"
 function extractPhoneFromCustomer(customer) {
   if (!customer || typeof customer !== "object") return null;
 
-  // Common candidates first
   const directCandidates = [
     customer.phone,
     customer.phone_number,
@@ -283,7 +330,6 @@ function extractPhoneFromCustomer(customer) {
 
   if (directCandidates.length > 0) return directCandidates[0];
 
-  // Fallback: scan any key containing "phone"
   for (const [k, v] of Object.entries(customer)) {
     if (typeof v !== "string") continue;
     if (k.toLowerCase().includes("phone")) {
@@ -300,11 +346,9 @@ function normalizePhone(raw) {
   const digits = String(raw).replace(/\D/g, "");
   if (!digits) return null;
 
-  // US numbers with optional leading 1
   if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
   if (digits.length === 10) return digits;
 
-  // fallback (intl or weird formats)
   return digits;
 }
 
@@ -337,33 +381,30 @@ function getClientPhoneLabel(customer) {
   return maskPhone(pretty);
 }
 
-// Use this when you need the real digits for texting (not masked)
 function getClientPhoneDigits(customer) {
   const raw = extractPhoneFromCustomer(customer);
   if (!raw) return null;
-  return normalizePhone(raw); // returns 10-digit US (or fallback digits)
+  return normalizePhone(raw);
 }
 
 // ---------------------------------------------------------
 // ORDER / APPT HELPERS
 // ---------------------------------------------------------
 
-// Very simple drone-detection helper.
-// Adjust keywords if your product names change.
 function orderRequiresDrone(order) {
   const droneKeywords = [
     "drone",
     "aerial",
     "plus package",
     "pro package",
-    "property listing video", // you said this uses drone when permitted
+    "property listing video",
   ];
 
   const items = order.items || order.order_items || [];
 
   if (!Array.isArray(items) || items.length === 0) {
     console.log("ℹ️ No order items found when checking for drone.");
-    return null; // unknown
+    return null;
   }
 
   const itemsLower = items.map((item) => {
@@ -384,7 +425,6 @@ function orderRequiresDrone(order) {
   return false;
 }
 
-// Fetch order details from Aryeo.
 async function fetchOrder(orderId) {
   if (!ARYEO_API_KEY) {
     console.log("❌ ARYEO_API_KEY missing, cannot fetch order.");
@@ -417,6 +457,7 @@ async function fetchOrder(orderId) {
       id: order.id,
       number: order.number,
       title: order.title,
+      status: order.status,
       hasCustomer: !!order.customer,
       hasListing: !!order.listing,
       listingHasAddress: !!(
@@ -437,7 +478,6 @@ async function fetchOrder(orderId) {
   }
 }
 
-// Fetch payment-info for an order (extra endpoint Aryeo exposes)
 async function fetchOrderPaymentInfo(orderId) {
   if (!ARYEO_API_KEY) {
     console.log("❌ ARYEO_API_KEY missing, cannot fetch order payment-info.");
@@ -511,19 +551,19 @@ async function fetchAppointmentsForDate(dateIso) {
     const appointments = json.data || [];
 
     // Hard-filter by Eastern local date
-    const filtered = appointments.filter((appt) => {
+    const filteredByDate = appointments.filter((appt) => {
       const raw = appt.start_at || appt.scheduled_at || appt.date || null;
       const apptYmd = raw ? getEasternYMD(raw) : null;
       return apptYmd === dateIso;
     });
 
     console.log(
-      `✅ Appointments for ${dateIso}: raw=${appointments.length}, filtered=${filtered.length}`
+      `✅ Appointments for ${dateIso}: raw=${appointments.length}, dateFiltered=${filteredByDate.length}`
     );
 
     // Enrich each appointment with a FULL order object (so customer phone is present reliably)
     const enriched = await Promise.all(
-      filtered.map(async (appt) => {
+      filteredByDate.map(async (appt) => {
         if (appt.order && appt.order.customer) {
           return appt;
         }
@@ -538,14 +578,48 @@ async function fetchAppointmentsForDate(dateIso) {
       })
     );
 
-    return enriched;
+    // NEW: filter out canceled appointments/orders AFTER enrichment
+    const notCanceled = [];
+    const canceled = [];
+
+    for (const appt of enriched) {
+      if (isCanceledAppointmentOrOrder_(appt)) {
+        canceled.push(appt);
+      } else {
+        notCanceled.push(appt);
+      }
+    }
+
+    console.log(
+      `🚫 Cancel filter applied: kept=${notCanceled.length}, removedCanceled=${canceled.length}`
+    );
+
+    if (DEBUG_CANCELED_FILTER && canceled.length > 0) {
+      console.log(
+        "🧾 CANCELED REMOVED (sample up to 5):",
+        canceled.slice(0, 5).map((a) => ({
+          apptId: a.id,
+          apptStatus: a.status,
+          apptCanceledAt: a.canceled_at || a.cancelled_at || null,
+          orderId: a.order_id || a.order?.id || null,
+          orderStatus: a.order?.status,
+          orderCanceledAt: a.order?.canceled_at || a.order?.cancelled_at || null,
+          start_at: a.start_at || a.scheduled_at || a.date || null,
+        }))
+      );
+    }
+
+    return notCanceled;
   } catch (err) {
     console.error("💥 Error fetching appointments from Aryeo:", err);
     return null;
   }
 }
 
-// Try to build a human-readable address from a generic object
+// ---------------------------------------------------------
+// ADDRESS HELPERS
+// ---------------------------------------------------------
+
 function extractAddressFromObject(obj) {
   if (!obj || typeof obj !== "object") return null;
 
@@ -615,7 +689,6 @@ function extractAddressFromObject(obj) {
   return parts.join(", ");
 }
 
-// Deep scan for any .full_address field anywhere in a nested object
 function findAnyFullAddress(obj, depth = 0) {
   if (!obj || typeof obj !== "object" || depth > 8) return null;
 
@@ -633,7 +706,6 @@ function findAnyFullAddress(obj, depth = 0) {
   return null;
 }
 
-// Very loose scan for ANY address-like string in a nested object
 function findAnyAddressLikeString(obj, depth = 0) {
   if (!obj || typeof obj !== "object" || depth > 8) return null;
 
@@ -655,7 +727,6 @@ function findAnyAddressLikeString(obj, depth = 0) {
   return null;
 }
 
-// Look through all likely places on the appointment + order
 function extractAddressFromAppointment(appt) {
   if (!appt) return null;
   const order = appt.order || {};
@@ -736,7 +807,6 @@ function extractCityFromAppointment(appt) {
     if (city) return city;
   }
 
-  // Deep scan: find any object with a city-like field
   const deepScan = (obj, depth = 0) => {
     if (!obj || typeof obj !== "object" || depth > 8) return null;
 
@@ -755,7 +825,6 @@ function extractCityFromAppointment(appt) {
   return deepScan({ appointment: appt, order });
 }
 
-// Ensures "Street, City" (does NOT force state/zip — just city like you asked)
 function getSmsLocationLabel(appt) {
   const addr = extractAddressFromAppointment(appt);
   const city = extractCityFromAppointment(appt);
@@ -764,13 +833,16 @@ function getSmsLocationLabel(appt) {
   if (addr && city) {
     const addrLower = String(addr).toLowerCase();
     const cityLower = String(city).toLowerCase();
-    if (addrLower.includes(cityLower)) return addr; // avoid duplicate
+    if (addrLower.includes(cityLower)) return addr;
     return `${addr}, ${city}`;
   }
   return addr || city;
 }
 
-// Build the Discord message for today's appointments
+// ---------------------------------------------------------
+// DISCORD: Morning briefing
+// ---------------------------------------------------------
+
 function buildMorningBriefingMessage(dateIso, appointments) {
   const { date: prettyDate } = formatToEastern(`${dateIso}T00:00:00Z`);
 
@@ -859,7 +931,6 @@ function buildMorningBriefingMessage(dateIso, appointments) {
   return lines.join("\n");
 }
 
-// Main function to send the morning briefing
 async function sendMorningBriefing(dateOverrideIso) {
   const todayEst = dateOverrideIso || getEasternTodayYMD();
   console.log("📅 Sending morning briefing for date:", todayEst);
@@ -889,7 +960,6 @@ async function sendClientRemindersForDate(
   targetDate,
   { limit = 0, idxOnly = null, forceDryRun = false } = {}
 ) {
-  // IMPORTANT: don't kill the whole cron if env is missing—return a clean result instead.
   if (!SMRTPHONE_FROM_NUMBER) {
     console.error("❌ Missing SMRTPHONE_FROM_NUMBER env var (SMS will not send).");
     return {
@@ -956,10 +1026,8 @@ async function sendClientRemindersForDate(
       ? formatToEastern(startRaw)
       : { date: targetDate, time: "soon" };
 
-    // ✅ FIX: Use "Street, City" label for SMS
     const address = getSmsLocationLabel(appt);
 
-    // ✅ Keep opt-out line (you had it before)
     const message =
       `Good morning ${clientName}!\n` +
       `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
@@ -1015,7 +1083,7 @@ async function sendClientRemindersForDate(
 }
 
 // ---------------------------------------------------------
-// DAILY JOB WRAPPER (keeps Discord + SMS separate but same time)
+// DAILY JOB WRAPPER
 // ---------------------------------------------------------
 async function runDailyBriefingAndSms() {
   const targetDate = getEasternTodayYMD();
@@ -1026,7 +1094,6 @@ async function runDailyBriefingAndSms() {
     nowIso: new Date().toISOString(),
   });
 
-  // Run Discord + SMS independently so one failure doesn't block the other.
   let discordResult = null;
   let smsResult = null;
 
@@ -1097,6 +1164,15 @@ async function handleOrderCreated(activity) {
 
   const order = await fetchOrder(orderId);
 
+  // NEW: if the order is already canceled, do nothing.
+  if (order && looksCanceledStatus_(order.status)) {
+    console.log("🚫 ORDER_CREATED ignored because order is canceled:", {
+      orderId,
+      status: order.status,
+    });
+    return;
+  }
+
   if (order) {
     orderTitle = order.title || order.identifier || orderId;
     orderNumber = order.number || null;
@@ -1121,6 +1197,18 @@ async function handleOrderCreated(activity) {
 
     if (Array.isArray(order.appointments) && order.appointments.length > 0) {
       const appt = order.appointments[0];
+
+      // NEW: if the first appointment looks canceled, do nothing.
+      if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
+        console.log("🚫 ORDER_CREATED ignored because appointment/order canceled:", {
+          orderId,
+          apptId: appt.id,
+          apptStatus: appt.status,
+          orderStatus: order.status,
+        });
+        return;
+      }
+
       const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
 
       if (appointmentRaw && typeof appointmentRaw === "string") {
@@ -1227,6 +1315,15 @@ async function handleOrderPaymentReceived(activity) {
   let amountLabel = "unknown";
 
   const order = await fetchOrder(orderId);
+
+  // NEW: ignore payment events for canceled orders (safety)
+  if (order && looksCanceledStatus_(order.status)) {
+    console.log("🚫 PAYMENT_RECEIVED ignored because order is canceled:", {
+      orderId,
+      status: order.status,
+    });
+    return;
+  }
 
   if (order) {
     orderTitle = order.title || order.identifier || orderId;
@@ -1435,6 +1532,16 @@ async function handleAppointmentRescheduled(activity) {
 
   if (orderId) {
     const order = await fetchOrder(orderId);
+
+    // NEW: if the order is canceled, ignore reschedule noise
+    if (order && looksCanceledStatus_(order.status)) {
+      console.log("🚫 APPT_RESCHEDULED ignored because order is canceled:", {
+        orderId,
+        status: order.status,
+      });
+      return;
+    }
+
     if (order) {
       const orderNumber = order.number || null;
       const orderTitle = order.title || order.identifier || orderId;
@@ -1453,6 +1560,18 @@ async function handleAppointmentRescheduled(activity) {
 
       if (Array.isArray(order.appointments) && order.appointments.length > 0) {
         const appt = order.appointments[0];
+
+        // NEW: ignore if appointment/order canceled
+        if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
+          console.log("🚫 APPT_RESCHEDULED ignored because appointment/order canceled:", {
+            orderId,
+            apptId: appt.id,
+            apptStatus: appt.status,
+            orderStatus: order.status,
+          });
+          return;
+        }
+
         const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
 
         if (appointmentRaw && typeof appointmentRaw === "string") {
@@ -1468,6 +1587,16 @@ async function handleAppointmentRescheduled(activity) {
       const formatted = formatToEastern(appointmentRaw);
       appointmentDate = formatted.date;
       appointmentTime = formatted.time;
+    }
+
+    // NEW: ignore if resource itself looks canceled
+    if (looksCanceledStatus_(resource?.status) || looksCanceledStatus_(resource?.state)) {
+      console.log("🚫 APPT_RESCHEDULED ignored because appointment resource looks canceled:", {
+        apptId: resource?.id,
+        status: resource?.status,
+        state: resource?.state,
+      });
+      return;
     }
   }
 
@@ -1539,6 +1668,16 @@ async function handlePhotographerAssignmentChanged(activity) {
 
   if (orderId) {
     const order = await fetchOrder(orderId);
+
+    // NEW: ignore assignment changes for canceled orders
+    if (order && looksCanceledStatus_(order.status)) {
+      console.log("🚫 PHOTOG_ASSIGN ignored because order is canceled:", {
+        orderId,
+        status: order.status,
+      });
+      return;
+    }
+
     if (order) {
       orderNumber = order.number || null;
       orderTitle = order.title || order.identifier || orderId;
@@ -1587,6 +1726,17 @@ async function handlePhotographerAssignmentChanged(activity) {
       }
 
       if (appt) {
+        // NEW: ignore assignment changes for canceled appointment/order
+        if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
+          console.log("🚫 PHOTOG_ASSIGN ignored because appointment/order canceled:", {
+            orderId,
+            apptId: appt.id,
+            apptStatus: appt.status,
+            orderStatus: order.status,
+          });
+          return;
+        }
+
         const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
         if (appointmentRaw && typeof appointmentRaw === "string") {
           const formatted = formatToEastern(appointmentRaw);
@@ -1601,6 +1751,16 @@ async function handlePhotographerAssignmentChanged(activity) {
       const formatted = formatToEastern(appointmentRaw);
       appointmentDate = formatted.date;
       appointmentTime = formatted.time;
+    }
+
+    // NEW: ignore if resource looks canceled
+    if (looksCanceledStatus_(resource?.status) || looksCanceledStatus_(resource?.state)) {
+      console.log("🚫 PHOTOG_ASSIGN ignored because appointment resource looks canceled:", {
+        apptId: resource?.id,
+        status: resource?.status,
+        state: resource?.state,
+      });
+      return;
     }
 
     if (resource?.address?.full_address) {
@@ -1716,7 +1876,7 @@ app.post("/aryeo-webhook", async (req, res) => {
 });
 
 // ---------------------------------------------------------
-// CRON JOBS (uses the single time definition above)
+// CRON JOBS
 // ---------------------------------------------------------
 cron.schedule(
   DAILY_CRON_EXPR,
@@ -1730,8 +1890,6 @@ cron.schedule(
 // SIMPLE TEST ROUTES
 // ---------------------------------------------------------
 
-// Runs BOTH Discord + SMS immediately (no schedule)
-// Protect it with the same token you already use for SMS tests.
 app.get("/test-daily-job-now", async (req, res) => {
   const token = req.query.token || "";
   if (!SMRTPHONE_TEST_TOKEN || token !== SMRTPHONE_TEST_TOKEN) {
@@ -1749,7 +1907,6 @@ app.get("/test-daily-job-now", async (req, res) => {
   }
 });
 
-// Discord-only test
 app.get("/test-morning-briefing", async (req, res) => {
   try {
     const todayEst = getEasternTodayYMD();
@@ -1771,7 +1928,6 @@ app.get("/test-morning-briefing", async (req, res) => {
   }
 });
 
-// SMS-only test (single test number)
 app.get("/test-smrtphone", async (req, res) => {
   try {
     const token = req.query.token || "";
@@ -1810,14 +1966,6 @@ app.get("/test-smrtphone", async (req, res) => {
   }
 });
 
-// ✅ MANUAL CLIENT PINGS (texts each client with an appointment for today)
-// URL:
-// https://YOUR-RAILWAY-DOMAIN/ping-todays-clients?token=YOUR_TEST_TOKEN
-// Optional:
-//  - &date=YYYY-MM-DD (send for a specific Eastern date)
-//  - &dryRun=true (forces dry run for this request only)
-//  - &limit=2 (only send first N)
-//  - &idx=0 (send only one appointment by index)
 app.get("/ping-todays-clients", async (req, res) => {
   try {
     const token = req.query.token || "";
@@ -1825,7 +1973,6 @@ app.get("/ping-todays-clients", async (req, res) => {
       return res.status(401).send("Unauthorized");
     }
 
-    // Date selection (Eastern)
     let targetDate = (req.query.date && String(req.query.date)) || null;
     if (!targetDate) targetDate = getEasternTodayYMD();
 
@@ -1853,7 +2000,6 @@ app.get("/ping-todays-clients", async (req, res) => {
   }
 });
 
-// Discord channel tests
 app.get("/test-drone", async (req, res) => {
   await sendToDiscord(
     DRONE_WEBHOOK_URL,
@@ -1883,7 +2029,6 @@ app.get("/test-bookings", async (req, res) => {
   res.send("Sent test message to Bookings Discord webhook (if configured).");
 });
 
-// Root sanity route
 app.get("/", (req, res) => {
   res.send(
     "Aryeo → Discord webhook is running. " +
