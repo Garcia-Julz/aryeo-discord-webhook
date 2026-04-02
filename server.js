@@ -2,6 +2,7 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const cron = require("node-cron");
+const crypto = require("crypto");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -10,37 +11,49 @@ const PORT = process.env.PORT || 3000;
 // ONE PLACE TO CHANGE THE DAILY SCHEDULE TIME
 // ---------------------------------------------------------
 const DAILY_JOB_HOUR_ET = parseInt(process.env.DAILY_JOB_HOUR_ET || "8", 10); // 0-23
-const DAILY_JOB_MINUTE_ET = parseInt(process.env.DAILY_JOB_MINUTE_ET || "0", 10); // 0-59
+const DAILY_JOB_MINUTE_ET = parseInt(
+  process.env.DAILY_JOB_MINUTE_ET || "0",
+  10
+); // 0-59
 const CRON_TZ = "America/New_York";
 const DAILY_CRON_EXPR = `${DAILY_JOB_MINUTE_ET} ${DAILY_JOB_HOUR_ET} * * *`;
 
-// --- PHONE DISPLAY (Discord) ---
+// ---------------------------------------------------------
+// FEATURE FLAGS / DEBUG
+// ---------------------------------------------------------
 const SHOW_FULL_CLIENT_PHONE_IN_DISCORD =
-  (process.env.SHOW_FULL_CLIENT_PHONE_IN_DISCORD || "").toLowerCase() === "true";
+  (process.env.SHOW_FULL_CLIENT_PHONE_IN_DISCORD || "").toLowerCase() ===
+  "true";
 
-// --- OPTIONAL DEBUG ---
 const DEBUG_CANCELED_FILTER =
   (process.env.DEBUG_CANCELED_FILTER || "").toLowerCase() === "true";
 
 const DEBUG_ADDRESS_PARSING =
   (process.env.DEBUG_ADDRESS_PARSING || "").toLowerCase() === "true";
 
-// --- ENV VARS ---
+const ENABLE_REAL_SIGNATURE_VERIFICATION =
+  (process.env.ENABLE_REAL_SIGNATURE_VERIFICATION || "").toLowerCase() ===
+  "true";
+
+// ---------------------------------------------------------
+// ENV VARS
+// ---------------------------------------------------------
+
 // --- SMRTPHONE (SMS) ---
 const SMRTPHONE_API_KEY = process.env.SMRTPHONE_API_KEY;
-const SMRTPHONE_FROM_NUMBER = process.env.SMRTPHONE_FROM_NUMBER; // digits only (e.g. 18135551234)
+const SMRTPHONE_FROM_NUMBER = process.env.SMRTPHONE_FROM_NUMBER; // digits only
 const SMRTPHONE_TEST_TOKEN = process.env.SMRTPHONE_TEST_TOKEN; // protect test route
-const SMRTPHONE_TEST_NUMBER = process.env.SMRTPHONE_TEST_NUMBER; // digits only (e.g. 19547163636)
+const SMRTPHONE_TEST_NUMBER = process.env.SMRTPHONE_TEST_NUMBER; // digits only
 const SMRTPHONE_DRY_RUN =
   (process.env.SMRTPHONE_DRY_RUN || "").toLowerCase() === "true";
 
-// For real HMAC verification later if you want:
+// Aryeo
 const ARYEO_WEBHOOK_SECRET = process.env.ARYEO_WEBHOOK_SECRET;
-
-// API key used to call Aryeo REST API
 const ARYEO_API_KEY = process.env.ARYEO_API_KEY;
+const ARYEO_API_BASE_URL =
+  process.env.ARYEO_API_BASE_URL || "https://api.aryeo.com/v1";
 
-// Base URL for your Aryeo dashboard (used to build order links)
+// Base URL for Aryeo dashboard
 const ARYEO_ADMIN_BASE_URL =
   process.env.ARYEO_ADMIN_BASE_URL || "https://textured-media.aryeo.com";
 
@@ -56,14 +69,19 @@ const DRONE_MENTION = process.env.DRONE_MENTION || "@DronePilot";
 const PHOTOGRAPHER_DISCORD_MAP = {
   "Julian Garcia": "<@294642333352198148>",
   "Que Mckenzie": "<@242693007453847552>",
+  "Que McKenzie": "<@242693007453847552>",
 };
 
+// ---------------------------------------------------------
+// BOOT LOGS
+// ---------------------------------------------------------
 console.log("Boot: TIMEZONE =", CRON_TZ);
 console.log("Boot: DAILY_JOB_HOUR_ET =", DAILY_JOB_HOUR_ET);
 console.log("Boot: DAILY_JOB_MINUTE_ET =", DAILY_JOB_MINUTE_ET);
 console.log("Boot: DAILY_CRON_EXPR =", DAILY_CRON_EXPR);
 
 console.log("Boot: ARYEO_WEBHOOK_SECRET present?", !!ARYEO_WEBHOOK_SECRET);
+console.log("Boot: ENABLE_REAL_SIGNATURE_VERIFICATION =", ENABLE_REAL_SIGNATURE_VERIFICATION);
 console.log("Boot: ARYEO_API_KEY present?", !!ARYEO_API_KEY);
 console.log("Boot: DRONE_WEBHOOK_URL present?", !!DRONE_WEBHOOK_URL);
 console.log("Boot: QUICKBOOKS_WEBHOOK_URL present?", !!QUICKBOOKS_WEBHOOK_URL);
@@ -82,7 +100,9 @@ console.log(
 console.log("Boot: DEBUG_CANCELED_FILTER =", DEBUG_CANCELED_FILTER);
 console.log("Boot: DEBUG_ADDRESS_PARSING =", DEBUG_ADDRESS_PARSING);
 
-// --- BODY PARSER ---
+// ---------------------------------------------------------
+// BODY PARSER
+// ---------------------------------------------------------
 app.use(
   express.json({
     verify: (req, res, buf) => {
@@ -91,10 +111,53 @@ app.use(
   })
 );
 
-// --- SIGNATURE VERIFICATION (TEST MODE: always allow) ---
+// ---------------------------------------------------------
+// SIGNATURE VERIFICATION
+// ---------------------------------------------------------
+function timingSafeEqualStrings(a, b) {
+  const aBuf = Buffer.from(String(a || ""), "utf8");
+  const bBuf = Buffer.from(String(b || ""), "utf8");
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
 function verifyAryeoSignature(rawBody, signatureHeader) {
-  console.warn("⚠️ Skipping signature verification (TEST MODE).");
-  return true;
+  if (!ENABLE_REAL_SIGNATURE_VERIFICATION) {
+    console.warn("⚠️ Skipping signature verification (TEST MODE).");
+    return true;
+  }
+
+  if (!ARYEO_WEBHOOK_SECRET) {
+    console.error("❌ ENABLE_REAL_SIGNATURE_VERIFICATION is on but ARYEO_WEBHOOK_SECRET is missing.");
+    return false;
+  }
+
+  if (!rawBody || !signatureHeader) {
+    console.error("❌ Missing rawBody or signatureHeader for webhook verification.");
+    return false;
+  }
+
+  try {
+    const expected = crypto
+      .createHmac("sha256", ARYEO_WEBHOOK_SECRET)
+      .update(rawBody, "utf8")
+      .digest("hex");
+
+    const provided = String(signatureHeader).trim();
+
+    const valid =
+      timingSafeEqualStrings(provided, expected) ||
+      timingSafeEqualStrings(provided.replace(/^sha256=/i, ""), expected);
+
+    if (!valid) {
+      console.error("❌ Signature mismatch.");
+    }
+
+    return valid;
+  } catch (err) {
+    console.error("💥 Error verifying Aryeo signature:", err);
+    return false;
+  }
 }
 
 // ---------------------------------------------------------
@@ -110,7 +173,6 @@ function getEasternTodayYMD(dateObj = new Date()) {
   });
 }
 
-// Format ISO date/time to US Eastern
 function formatToEastern(isoString) {
   if (!isoString) return { date: "unknown", time: "unknown" };
 
@@ -136,7 +198,6 @@ function formatToEastern(isoString) {
   };
 }
 
-// Normalize a datetime to YYYY-MM-DD in US Eastern
 function getEasternYMD(isoString) {
   if (!isoString) return null;
 
@@ -159,11 +220,7 @@ function getEasternYMD(isoString) {
 }
 
 function getAppointmentSortTime_(appt) {
-  const raw =
-    appt?.start_at ||
-    appt?.scheduled_at ||
-    appt?.date ||
-    null;
+  const raw = appt?.start_at || appt?.scheduled_at || appt?.date || null;
 
   if (!raw) return Number.MAX_SAFE_INTEGER;
 
@@ -171,6 +228,20 @@ function getAppointmentSortTime_(appt) {
   if (Number.isNaN(ms)) return Number.MAX_SAFE_INTEGER;
 
   return ms;
+}
+
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function formatCurrencyFromUnknownValue(val) {
+  if (typeof val !== "number" || !isFinite(val) || val <= 0) return null;
+  const dollars = val > 9999 ? val / 100 : val;
+  return `$${dollars.toFixed(2)}`;
 }
 
 async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
@@ -184,7 +255,6 @@ async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
   const baseBody =
     typeof payload === "string" ? { content: payload } : payload || {};
 
-  // Disable link embeds / previews in Discord
   const body = {
     ...baseBody,
     flags: ((baseBody.flags || 0) | 4),
@@ -197,12 +267,15 @@ async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
+
     console.log(`📨 Discord status [${contextLabel}]:`, resp.status);
+
     if (!resp.ok) {
       const text = await resp.text();
-      console.error("❌ Discord error response:", text);
+      console.error(`❌ Discord error response [${contextLabel}]:`, text);
       return { ok: false, status: resp.status, body: text };
     }
+
     return { ok: true, status: resp.status };
   } catch (err) {
     console.error(`❌ Error sending to Discord [${contextLabel}]:`, err);
@@ -216,14 +289,17 @@ function buildGoogleMapsUrl(addressString) {
   return `https://www.google.com/maps/search/?api=1&query=${encoded}`;
 }
 
+function dedupeStrings(arr) {
+  return [...new Set((arr || []).filter(Boolean).map((v) => String(v).trim()).filter(Boolean))];
+}
+
 // ---------------------------------------------------------
-// CANCEL / STATUS FILTER (NEW)
+// CANCEL / STATUS FILTER
 // ---------------------------------------------------------
 
 function looksCanceledStatus_(val) {
   const s = String(val || "").toLowerCase().trim();
   if (!s) return false;
-  // handles: canceled, cancelled, cancel, cancelled_at, etc
   return s.includes("cancel") || s.includes("void");
 }
 
@@ -254,8 +330,6 @@ function isCanceledAppointmentOrOrder_(appt) {
 
   const apptStatusCanceled = looksCanceledStatus_(appt.status);
   const orderStatusCanceled = looksCanceledStatus_(order.status);
-
-  // Some APIs include "state"
   const apptStateCanceled = looksCanceledStatus_(appt.state);
   const orderStateCanceled = looksCanceledStatus_(order.state);
 
@@ -278,6 +352,7 @@ async function sendSmrtPhoneSms({ from, to, message }) {
     console.error("❌ Missing SMRTPHONE_API_KEY");
     return { ok: false, error: "Missing SMRTPHONE_API_KEY" };
   }
+
   if (!from || !to || !message) {
     console.error("❌ sendSmrtPhoneSms missing from/to/message");
     return { ok: false, error: "Missing from/to/message" };
@@ -328,7 +403,7 @@ async function sendSmrtPhoneSms({ from, to, message }) {
 }
 
 // ---------------------------------------------------------
-// PHONE HELPERS (for Discord output + SMS)
+// PHONE HELPERS
 // ---------------------------------------------------------
 
 function normalizePhoneString(raw) {
@@ -417,6 +492,20 @@ function getClientPhoneDigits(customer) {
 // ORDER / APPT HELPERS
 // ---------------------------------------------------------
 
+function summarizeOrderItems(items) {
+  if (!Array.isArray(items) || items.length === 0) return "Unknown service";
+
+  const names = items
+    .map((item) => item.name || item.product_name || item.title)
+    .filter(Boolean);
+
+  if (names.length === 0) return "Unknown service";
+  if (names.length === 1) return names[0];
+
+  const firstFew = names.slice(0, 3).join(", ");
+  return names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
+}
+
 function orderRequiresDrone(order) {
   const droneKeywords = [
     "drone",
@@ -435,7 +524,7 @@ function orderRequiresDrone(order) {
 
   const itemsLower = items.map((item) => {
     const name = item.name || item.product_name || item.title || "";
-    return name.toLowerCase();
+    return String(name).toLowerCase();
   });
 
   const hit = droneKeywords.find((kw) =>
@@ -451,18 +540,16 @@ function orderRequiresDrone(order) {
   return false;
 }
 
-async function fetchOrder(orderId) {
+async function aryeoGet(path, contextLabel = "ARYEO") {
   if (!ARYEO_API_KEY) {
-    console.log("❌ ARYEO_API_KEY missing, cannot fetch order.");
+    console.log("❌ ARYEO_API_KEY missing, cannot call Aryeo.");
     return null;
   }
 
-  const url =
-    `https://api.aryeo.com/v1/orders/${orderId}` +
-    `?include=items,listing,customer,appointments,appointments.users,payments`;
+  const url = `${ARYEO_API_BASE_URL}${path}`;
 
   try {
-    console.log("🔍 Fetching order from Aryeo:", url);
+    console.log(`🔍 Fetching from Aryeo [${contextLabel}]:`, url);
     const resp = await fetch(url, {
       headers: {
         Accept: "application/json",
@@ -470,176 +557,149 @@ async function fetchOrder(orderId) {
       },
     });
 
+    const text = await resp.text();
+    const json = safeJsonParse(text);
+
     if (!resp.ok) {
-      const text = await resp.text();
-      console.error("❌ Aryeo order fetch failed:", resp.status, text);
+      console.error(`❌ Aryeo request failed [${contextLabel}]:`, resp.status, text);
       return null;
     }
 
-    const json = await resp.json();
-    const order = json.data || json.order || json;
-
-    console.log("✅ Aryeo order fetch success. Sample:", {
-      id: order.id,
-      number: order.number,
-      title: order.title,
-      status: order.status,
-      hasCustomer: !!order.customer,
-      hasListing: !!order.listing,
-      listingHasAddress: !!(
-        order.listing &&
-        order.listing.address &&
-        order.listing.address.full_address
-      ),
-      hasOrderAddress: !!(order.address && order.address.full_address),
-      appointmentsType: Array.isArray(order.appointments)
-        ? `array(${order.appointments.length})`
-        : typeof order.appointments,
-    });
-
-    return order;
+    return json;
   } catch (err) {
-    console.error("💥 Error fetching order from Aryeo:", err);
+    console.error(`💥 Error calling Aryeo [${contextLabel}]:`, err);
     return null;
   }
+}
+
+async function fetchOrder(orderId) {
+  if (!orderId) return null;
+
+  const json = await aryeoGet(
+    `/orders/${orderId}?include=items,listing,listing.address,address,customer,appointments,appointments.users,payments`,
+    "FETCH_ORDER"
+  );
+
+  if (!json) return null;
+
+  const order = json.data || json.order || json;
+
+  console.log("✅ Aryeo order fetch success. Sample:", {
+    id: order?.id,
+    number: order?.number,
+    title: order?.title,
+    status: order?.status,
+    hasCustomer: !!order?.customer,
+    hasListing: !!order?.listing,
+    listingHasAddress: !!(
+      order?.listing &&
+      order?.listing?.address &&
+      order?.listing?.address?.full_address
+    ),
+    hasOrderAddress: !!(order?.address && order?.address?.full_address),
+    appointmentsType: Array.isArray(order?.appointments)
+      ? `array(${order.appointments.length})`
+      : typeof order?.appointments,
+  });
+
+  return order;
 }
 
 async function fetchOrderPaymentInfo(orderId) {
-  if (!ARYEO_API_KEY) {
-    console.log("❌ ARYEO_API_KEY missing, cannot fetch order payment-info.");
-    return null;
-  }
+  if (!orderId) return null;
 
-  const url = `https://api.aryeo.com/v1/orders/${orderId}/payment-info`;
+  const json = await aryeoGet(
+    `/orders/${orderId}/payment-info`,
+    "FETCH_ORDER_PAYMENT_INFO"
+  );
 
-  try {
-    console.log("🔍 Fetching order payment-info from Aryeo:", url);
-    const resp = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${ARYEO_API_KEY}`,
-      },
-    });
+  if (!json) return null;
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      console.error(
-        "❌ Aryeo order payment-info fetch failed:",
-        resp.status,
-        text
-      );
-      return null;
-    }
+  console.log(
+    "💰 Payment-info debug for order",
+    orderId,
+    JSON.stringify(json, null, 2)
+  );
 
-    const json = await resp.json();
-
-    console.log(
-      "💰 Payment-info debug for order",
-      orderId,
-      JSON.stringify(json, null, 2)
-    );
-
-    return json.data || json;
-  } catch (err) {
-    console.error("💥 Error fetching order payment-info from Aryeo:", err);
-    return null;
-  }
+  return json.data || json;
 }
 
-// Fetch appointments for a specific YYYY-MM-DD (Eastern) date
 async function fetchAppointmentsForDate(dateIso) {
-  if (!ARYEO_API_KEY) {
-    console.log("❌ ARYEO_API_KEY missing, cannot fetch appointments.");
-    return null;
-  }
+  if (!dateIso) return null;
 
-  const url =
-    `https://api.aryeo.com/v1/appointments` +
-    `?filter[date]=${dateIso}` +
-    `&include=order,order.customer,order.items,order.listing,users`;
+  const json = await aryeoGet(
+    `/appointments?filter[date]=${dateIso}&include=order,order.address,order.customer,order.items,order.listing,order.listing.address,users`,
+    "FETCH_APPOINTMENTS_FOR_DATE"
+  );
 
-  try {
-    console.log("🔍 Fetching appointments from Aryeo:", url);
-    const resp = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-        Authorization: `Bearer ${ARYEO_API_KEY}`,
-      },
-    });
+  if (!json) return null;
 
-    if (!resp.ok) {
-      const text = await resp.text();
-      console.error("❌ Failed to fetch appointments:", resp.status, text);
-      return null;
-    }
+  const appointments = json.data || [];
 
-    const json = await resp.json();
-    const appointments = json.data || [];
+  const filteredByDate = appointments.filter((appt) => {
+    const raw = appt.start_at || appt.scheduled_at || appt.date || null;
+    const apptYmd = raw ? getEasternYMD(raw) : null;
+    return apptYmd === dateIso;
+  });
 
-    // Hard-filter by Eastern local date
-    const filteredByDate = appointments.filter((appt) => {
-      const raw = appt.start_at || appt.scheduled_at || appt.date || null;
-      const apptYmd = raw ? getEasternYMD(raw) : null;
-      return apptYmd === dateIso;
-    });
+  console.log(
+    `✅ Appointments for ${dateIso}: raw=${appointments.length}, dateFiltered=${filteredByDate.length}`
+  );
 
-    console.log(
-      `✅ Appointments for ${dateIso}: raw=${appointments.length}, dateFiltered=${filteredByDate.length}`
-    );
-
-    // Enrich each appointment with a FULL order object (so customer phone is present reliably)
-    const enriched = await Promise.all(
-      filteredByDate.map(async (appt) => {
-        if (appt.order && appt.order.customer) {
-          return appt;
-        }
-
-        const orderId = appt.order_id || (appt.order && appt.order.id) || null;
-        if (!orderId) return appt;
-
-        const fullOrder = await fetchOrder(orderId);
-        if (!fullOrder) return appt;
-
-        return { ...appt, order: fullOrder };
-      })
-    );
-
-    // NEW: filter out canceled appointments/orders AFTER enrichment
-    const notCanceled = [];
-    const canceled = [];
-
-    for (const appt of enriched) {
-      if (isCanceledAppointmentOrOrder_(appt)) {
-        canceled.push(appt);
-      } else {
-        notCanceled.push(appt);
+  const enriched = await Promise.all(
+    filteredByDate.map(async (appt) => {
+      if (
+        appt.order &&
+        appt.order.customer &&
+        (
+          appt.order.address ||
+          (appt.order.listing && appt.order.listing.address)
+        )
+      ) {
+        return appt;
       }
+
+      const orderId = appt.order_id || (appt.order && appt.order.id) || null;
+      if (!orderId) return appt;
+
+      const fullOrder = await fetchOrder(orderId);
+      if (!fullOrder) return appt;
+
+      return { ...appt, order: fullOrder };
+    })
+  );
+
+  const notCanceled = [];
+  const canceled = [];
+
+  for (const appt of enriched) {
+    if (isCanceledAppointmentOrOrder_(appt)) {
+      canceled.push(appt);
+    } else {
+      notCanceled.push(appt);
     }
-
-    console.log(
-      `🚫 Cancel filter applied: kept=${notCanceled.length}, removedCanceled=${canceled.length}`
-    );
-
-    if (DEBUG_CANCELED_FILTER && canceled.length > 0) {
-      console.log(
-        "🧾 CANCELED REMOVED (sample up to 5):",
-        canceled.slice(0, 5).map((a) => ({
-          apptId: a.id,
-          apptStatus: a.status,
-          apptCanceledAt: a.canceled_at || a.cancelled_at || null,
-          orderId: a.order_id || a.order?.id || null,
-          orderStatus: a.order?.status,
-          orderCanceledAt: a.order?.canceled_at || a.order?.cancelled_at || null,
-          start_at: a.start_at || a.scheduled_at || a.date || null,
-        }))
-      );
-    }
-
-    return notCanceled;
-  } catch (err) {
-    console.error("💥 Error fetching appointments from Aryeo:", err);
-    return null;
   }
+
+  console.log(
+    `🚫 Cancel filter applied: kept=${notCanceled.length}, removedCanceled=${canceled.length}`
+  );
+
+  if (DEBUG_CANCELED_FILTER && canceled.length > 0) {
+    console.log(
+      "🧾 CANCELED REMOVED (sample up to 5):",
+      canceled.slice(0, 5).map((a) => ({
+        apptId: a.id,
+        apptStatus: a.status,
+        apptCanceledAt: a.canceled_at || a.cancelled_at || null,
+        orderId: a.order_id || a.order?.id || null,
+        orderStatus: a.order?.status,
+        orderCanceledAt: a.order?.canceled_at || a.order?.cancelled_at || null,
+        start_at: a.start_at || a.scheduled_at || a.date || null,
+      }))
+    );
+  }
+
+  return notCanceled;
 }
 
 // ---------------------------------------------------------
@@ -685,7 +745,10 @@ function scoreAddressCandidate_(value) {
   if (s.length >= 20) score += 5;
   if (s.length >= 30) score += 5;
 
-  if (!hasStreetNumber_(s) && /\b(st|street|ave|avenue|rd|road|dr|drive)\b/i.test(s)) {
+  if (
+    !hasStreetNumber_(s) &&
+    /\b(st|street|ave|avenue|rd|road|dr|drive)\b/i.test(s)
+  ) {
     score -= 25;
   }
 
@@ -757,7 +820,7 @@ function extractAddressCandidatesFromObject_(obj) {
   if (composed) candidates.push(composed);
   if (composedStreet) candidates.push(composedStreet);
 
-  return [...new Set(candidates)];
+  return dedupeStrings(candidates);
 }
 
 function chooseBestAddressCandidate_(candidates) {
@@ -776,7 +839,6 @@ function chooseBestAddressCandidate_(candidates) {
 
 function extractAddressFromObject(obj) {
   if (!obj || typeof obj !== "object") return null;
-
   const candidates = extractAddressCandidatesFromObject_(obj);
   return chooseBestAddressCandidate_(candidates);
 }
@@ -826,8 +888,6 @@ function extractAddressFromAppointment(appt) {
   if (!appt) return null;
   const order = appt.order || {};
 
-  // IMPORTANT:
-  // Parent object first, nested address second, so nested fields win.
   const mergedListing = order.listing
     ? { ...order.listing, ...(order.listing.address || {}) }
     : null;
@@ -857,14 +917,14 @@ function extractAddressFromAppointment(appt) {
     gatheredCandidates.push(...extracted);
   }
 
-  const bestCandidate = chooseBestAddressCandidate_([...new Set(gatheredCandidates)]);
+  const bestCandidate = chooseBestAddressCandidate_(dedupeStrings(gatheredCandidates));
   if (bestCandidate) {
     if (DEBUG_ADDRESS_PARSING) {
       console.log("📍 Address candidate selection:", {
         appointmentId: appt.id || null,
         orderId: order.id || null,
         chosen: bestCandidate,
-        candidates: [...new Set(gatheredCandidates)],
+        candidates: dedupeStrings(gatheredCandidates),
       });
     }
     return bestCandidate;
@@ -880,8 +940,9 @@ function extractAddressFromAppointment(appt) {
 }
 
 // ---------------------------------------------------------
-// CITY HELPERS (for SMS "Street, City")
+// CITY HELPERS
 // ---------------------------------------------------------
+
 function extractCityFromObject(obj) {
   if (!obj || typeof obj !== "object") return null;
 
@@ -1013,22 +1074,7 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     const shootersLabel =
       shooterNames.length === 0 ? "Unassigned" : shooterNames.join(", ");
 
-    let serviceSummary = "Unknown service";
-    if (Array.isArray(items) && items.length > 0) {
-      const names = items
-        .map((item) => item.name || item.product_name || item.title)
-        .filter(Boolean);
-
-      if (names.length === 1) {
-        serviceSummary = names[0];
-      } else if (names.length > 1) {
-        const firstFew = names.slice(0, 3).join(", ");
-        serviceSummary =
-          names.length > 3
-            ? `${firstFew} (+${names.length - 3} more)`
-            : firstFew;
-      }
-    }
+    const serviceSummary = summarizeOrderItems(items);
 
     const orderId = order.id;
     const orderLabel = order.number
@@ -1074,6 +1120,7 @@ async function sendMorningBriefing(dateOverrideIso) {
 // ---------------------------------------------------------
 // SMS: Send reminders to clients for a given Eastern date
 // ---------------------------------------------------------
+
 async function sendClientRemindersForDate(
   targetDate,
   { limit = 0, idxOnly = null, forceDryRun = false } = {}
@@ -1203,6 +1250,7 @@ async function sendClientRemindersForDate(
 // ---------------------------------------------------------
 // DAILY JOB WRAPPER
 // ---------------------------------------------------------
+
 async function runDailyBriefingAndSms() {
   const targetDate = getEasternTodayYMD();
   console.log("⏰ Daily job fired:", {
@@ -1269,7 +1317,6 @@ async function handleOrderCreated(activity) {
 
   let appointmentDate = "unknown";
   let appointmentTime = "unknown";
-
   let propertyAddress = "unknown";
   let mapsUrl = null;
 
@@ -1282,7 +1329,6 @@ async function handleOrderCreated(activity) {
 
   const order = await fetchOrder(orderId);
 
-  // NEW: if the order is already canceled, do nothing.
   if (order && looksCanceledStatus_(order.status)) {
     console.log("🚫 ORDER_CREATED ignored because order is canceled:", {
       orderId,
@@ -1312,7 +1358,6 @@ async function handleOrderCreated(activity) {
     if (Array.isArray(order.appointments) && order.appointments.length > 0) {
       const appt = order.appointments[0];
 
-      // NEW: if the first appointment looks canceled, do nothing.
       if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
         console.log("🚫 ORDER_CREATED ignored because appointment/order canceled:", {
           orderId,
@@ -1352,20 +1397,7 @@ async function handleOrderCreated(activity) {
       }
     }
 
-    const items = order.items || order.order_items || [];
-    if (Array.isArray(items) && items.length > 0) {
-      const names = items
-        .map((item) => item.name || item.product_name || item.title)
-        .filter(Boolean);
-
-      if (names.length === 1) serviceSummary = names[0];
-      else if (names.length > 1) {
-        const firstFew = names.slice(0, 3).join(", ");
-        serviceSummary =
-          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
-      }
-    }
-
+    serviceSummary = summarizeOrderItems(order.items || order.order_items || []);
     requiresDrone = orderRequiresDrone(order);
   }
 
@@ -1385,7 +1417,6 @@ async function handleOrderCreated(activity) {
   else lines.push(`• Order #: \`${orderLabel}\``);
 
   if (customerName !== "unknown") lines.push(`• Client: \`${customerName}\``);
-
   lines.push(`• Service: \`${serviceSummary}\``);
 
   if (photographerNames.length > 0) {
@@ -1399,7 +1430,6 @@ async function handleOrderCreated(activity) {
   lines.push(`• Date: \`${appointmentDate}\``);
   lines.push(`• Time: \`${appointmentTime}\``);
   lines.push(`• Location: \`${propertyAddress}\``);
-
   if (mapsUrl) lines.push(`• Map: ${mapsUrl}`);
 
   lines.push("");
@@ -1436,7 +1466,6 @@ async function handleOrderPaymentReceived(activity) {
 
   const order = await fetchOrder(orderId);
 
-  // NEW: ignore payment events for canceled orders (safety)
   if (order && looksCanceledStatus_(order.status)) {
     console.log("🚫 PAYMENT_RECEIVED ignored because order is canceled:", {
       orderId,
@@ -1476,9 +1505,11 @@ async function handleOrderPaymentReceived(activity) {
         ].filter((val) => typeof val === "number" && val > 0);
 
         for (const val of numericCandidates) {
-          if (val > 9999) amountLabel = `$${(val / 100).toFixed(2)}`;
-          else amountLabel = `$${val.toFixed(2)}`;
-          break;
+          const formatted = formatCurrencyFromUnknownValue(val);
+          if (formatted) {
+            amountLabel = formatted;
+            break;
+          }
         }
       }
     }
@@ -1502,9 +1533,11 @@ async function handleOrderPaymentReceived(activity) {
       ].filter((val) => typeof val === "number" && val > 0);
 
       for (const val of orderNumericCandidates) {
-        const dollars = val > 9999 ? val / 100 : val;
-        amountLabel = `$${dollars.toFixed(2)}`;
-        break;
+        const formatted = formatCurrencyFromUnknownValue(val);
+        if (formatted) {
+          amountLabel = formatted;
+          break;
+        }
       }
     }
   }
@@ -1513,13 +1546,9 @@ async function handleOrderPaymentReceived(activity) {
     if (resource.total_price_formatted) {
       amountLabel = resource.total_price_formatted;
     } else if (typeof resource.total_price === "number" && resource.total_price !== 0) {
-      const val = resource.total_price;
-      const dollars = val > 9999 ? val / 100 : val;
-      amountLabel = `$${dollars.toFixed(2)}`;
+      amountLabel = formatCurrencyFromUnknownValue(resource.total_price) || amountLabel;
     } else if (typeof resource.amount === "number" && resource.amount !== 0) {
-      const val = resource.amount;
-      const dollars = val > 9999 ? val / 100 : val;
-      amountLabel = `$${dollars.toFixed(2)}`;
+      amountLabel = formatCurrencyFromUnknownValue(resource.amount) || amountLabel;
     } else if (typeof resource.amount === "string" && resource.amount.trim() !== "") {
       amountLabel = resource.amount;
     }
@@ -1547,9 +1576,11 @@ async function handleOrderPaymentReceived(activity) {
         ].filter((val) => typeof val === "number" && val > 0);
 
         for (const val of numericCandidates) {
-          if (val > 9999) amountLabel = `$${(val / 100).toFixed(2)}`;
-          else amountLabel = `$${val.toFixed(2)}`;
-          break;
+          const formatted = formatCurrencyFromUnknownValue(val);
+          if (formatted) {
+            amountLabel = formatted;
+            break;
+          }
         }
       }
     }
@@ -1605,23 +1636,10 @@ async function handleOrderCanceled(activity) {
 
     if (order.customer && order.customer.name) customerName = order.customer.name;
 
-    const items = order.items || order.order_items || [];
-    if (Array.isArray(items) && items.length > 0) {
-      const names = items
-        .map((item) => item.name || item.product_name || item.title)
-        .filter(Boolean);
-
-      if (names.length === 1) serviceSummary = names[0];
-      else if (names.length > 1) {
-        const firstFew = names.slice(0, 3).join(", ");
-        serviceSummary =
-          names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
-      }
-    }
+    serviceSummary = summarizeOrderItems(order.items || order.order_items || []);
   }
 
   const label = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
-
   const when = formatToEastern(occurred_at);
   const reason = activity.reason || (activity.metadata && activity.metadata.reason) || null;
 
@@ -1653,7 +1671,6 @@ async function handleAppointmentRescheduled(activity) {
   if (orderId) {
     const order = await fetchOrder(orderId);
 
-    // NEW: if the order is canceled, ignore reschedule noise
     if (order && looksCanceledStatus_(order.status)) {
       console.log("🚫 APPT_RESCHEDULED ignored because order is canceled:", {
         orderId,
@@ -1682,7 +1699,6 @@ async function handleAppointmentRescheduled(activity) {
       if (Array.isArray(order.appointments) && order.appointments.length > 0) {
         const appt = order.appointments[0];
 
-        // NEW: ignore if appointment/order canceled
         if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
           console.log("🚫 APPT_RESCHEDULED ignored because appointment/order canceled:", {
             orderId,
@@ -1716,7 +1732,6 @@ async function handleAppointmentRescheduled(activity) {
       appointmentTime = formatted.time;
     }
 
-    // NEW: ignore if resource itself looks canceled
     if (looksCanceledStatus_(resource?.status) || looksCanceledStatus_(resource?.state)) {
       console.log("🚫 APPT_RESCHEDULED ignored because appointment resource looks canceled:", {
         apptId: resource?.id,
@@ -1785,6 +1800,9 @@ async function handlePhotographerAssignmentChanged(activity) {
     });
   }
 
+  shooterNames = dedupeStrings(shooterNames);
+  shooterMentions = dedupeStrings(shooterMentions);
+
   const direction =
     name && name.toUpperCase().includes("UNASSIGN") ? "unassigned from" : "assigned to";
 
@@ -1802,7 +1820,6 @@ async function handlePhotographerAssignmentChanged(activity) {
   if (orderId) {
     const order = await fetchOrder(orderId);
 
-    // NEW: ignore assignment changes for canceled orders
     if (order && looksCanceledStatus_(order.status)) {
       console.log("🚫 PHOTOG_ASSIGN ignored because order is canceled:", {
         orderId,
@@ -1831,19 +1848,7 @@ async function handlePhotographerAssignmentChanged(activity) {
         mapsUrl = buildGoogleMapsUrl(propertyAddress);
       }
 
-      const items = order.items || order.order_items || [];
-      if (Array.isArray(items) && items.length > 0) {
-        const names = items
-          .map((item) => item.name || item.product_name || item.title)
-          .filter(Boolean);
-
-        if (names.length === 1) serviceSummary = names[0];
-        else if (names.length > 1) {
-          const firstFew = names.slice(0, 3).join(", ");
-          serviceSummary =
-            names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
-        }
-      }
+      serviceSummary = summarizeOrderItems(order.items || order.order_items || []);
 
       let appt = null;
       if (Array.isArray(order.appointments) && order.appointments.length > 0) {
@@ -1857,7 +1862,6 @@ async function handlePhotographerAssignmentChanged(activity) {
       }
 
       if (appt) {
-        // NEW: ignore assignment changes for canceled appointment/order
         if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
           console.log("🚫 PHOTOG_ASSIGN ignored because appointment/order canceled:", {
             orderId,
@@ -1890,7 +1894,6 @@ async function handlePhotographerAssignmentChanged(activity) {
       appointmentTime = formatted.time;
     }
 
-    // NEW: ignore if resource looks canceled
     if (looksCanceledStatus_(resource?.status) || looksCanceledStatus_(resource?.state)) {
       console.log("🚫 PHOTOG_ASSIGN ignored because appointment resource looks canceled:", {
         apptId: resource?.id,
@@ -2016,6 +2019,7 @@ app.post("/aryeo-webhook", async (req, res) => {
 // ---------------------------------------------------------
 // CRON JOBS
 // ---------------------------------------------------------
+
 cron.schedule(
   DAILY_CRON_EXPR,
   async () => {
@@ -2047,9 +2051,14 @@ app.get("/test-daily-job-now", async (req, res) => {
 
 app.get("/test-morning-briefing", async (req, res) => {
   try {
-    const todayEst = getEasternTodayYMD();
-    const appointments = (await fetchAppointmentsForDate(todayEst)) || [];
-    const content = buildMorningBriefingMessage(todayEst, appointments);
+    const token = req.query.token || "";
+    if (SMRTPHONE_TEST_TOKEN && token !== SMRTPHONE_TEST_TOKEN) {
+      return res.status(401).send("Unauthorized");
+    }
+
+    const targetDate = (req.query.date && String(req.query.date)) || getEasternTodayYMD();
+    const appointments = (await fetchAppointmentsForDate(targetDate)) || [];
+    const content = buildMorningBriefingMessage(targetDate, appointments);
 
     await sendToDiscord(
       BOOKINGS_WEBHOOK_URL,
@@ -2057,12 +2066,48 @@ app.get("/test-morning-briefing", async (req, res) => {
       "DAILY-MORNING-BRIEFING-TEST"
     );
 
-    res.send(
-      `Sent test morning briefing for ${todayEst}. Count = ${appointments.length}`
+    return res.send(
+      `Sent test morning briefing for ${targetDate}. Count = ${appointments.length}`
     );
   } catch (err) {
     console.error("💥 Error in /test-morning-briefing:", err);
-    res.status(500).send("Server error.");
+    return res.status(500).send("Server error.");
+  }
+});
+
+app.get("/test-address-debug", async (req, res) => {
+  try {
+    const token = req.query.token || "";
+    if (!SMRTPHONE_TEST_TOKEN || token !== SMRTPHONE_TEST_TOKEN) {
+      return res.status(401).send("Unauthorized");
+    }
+
+    const targetDate = (req.query.date && String(req.query.date)) || getEasternTodayYMD();
+    const appointments = (await fetchAppointmentsForDate(targetDate)) || [];
+
+    const debug = appointments.map((appt, idx) => {
+      const order = appt.order || {};
+      return {
+        idx,
+        appointmentId: appt.id || null,
+        orderId: order.id || null,
+        rawStart: appt.start_at || appt.scheduled_at || appt.date || null,
+        parsedAddress: extractAddressFromAppointment(appt),
+        parsedCity: extractCityFromAppointment(appt),
+        smsLocationLabel: getSmsLocationLabel(appt),
+        listingAddress: order.listing?.address || null,
+        orderAddress: order.address || null,
+      };
+    });
+
+    return res.status(200).json({
+      targetDate,
+      count: appointments.length,
+      debug,
+    });
+  } catch (err) {
+    console.error("💥 Error in /test-address-debug:", err);
+    return res.status(500).send("Server error");
   }
 });
 
@@ -2139,32 +2184,62 @@ app.get("/ping-todays-clients", async (req, res) => {
 });
 
 app.get("/test-drone", async (req, res) => {
-  await sendToDiscord(
-    DRONE_WEBHOOK_URL,
-    { content: "🧪 Test message to **Drone** channel from `/test-drone`" },
-    "DRONE-TEST"
-  );
-  res.send("Sent test message to Drone Discord webhook (if configured).");
+  try {
+    const token = req.query.token || "";
+    if (SMRTPHONE_TEST_TOKEN && token !== SMRTPHONE_TEST_TOKEN) {
+      return res.status(401).send("Unauthorized");
+    }
+
+    await sendToDiscord(
+      DRONE_WEBHOOK_URL,
+      { content: "🧪 Test message to **Drone** channel from `/test-drone`" },
+      "DRONE-TEST"
+    );
+    return res.send("Sent test message to Drone Discord webhook (if configured).");
+  } catch (err) {
+    console.error("💥 Error in /test-drone:", err);
+    return res.status(500).send("Server error");
+  }
 });
 
 app.get("/test-quickbooks", async (req, res) => {
-  await sendToDiscord(
-    QUICKBOOKS_WEBHOOK_URL,
-    {
-      content: "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`",
-    },
-    "QB-TEST"
-  );
-  res.send("Sent test message to QuickBooks Discord webhook (if configured).");
+  try {
+    const token = req.query.token || "";
+    if (SMRTPHONE_TEST_TOKEN && token !== SMRTPHONE_TEST_TOKEN) {
+      return res.status(401).send("Unauthorized");
+    }
+
+    await sendToDiscord(
+      QUICKBOOKS_WEBHOOK_URL,
+      {
+        content: "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`",
+      },
+      "QB-TEST"
+    );
+    return res.send("Sent test message to QuickBooks Discord webhook (if configured).");
+  } catch (err) {
+    console.error("💥 Error in /test-quickbooks:", err);
+    return res.status(500).send("Server error");
+  }
 });
 
 app.get("/test-bookings", async (req, res) => {
-  await sendToDiscord(
-    BOOKINGS_WEBHOOK_URL,
-    { content: "🧪 Test message to **Bookings** channel from `/test-bookings`" },
-    "BOOKINGS-TEST"
-  );
-  res.send("Sent test message to Bookings Discord webhook (if configured).");
+  try {
+    const token = req.query.token || "";
+    if (SMRTPHONE_TEST_TOKEN && token !== SMRTPHONE_TEST_TOKEN) {
+      return res.status(401).send("Unauthorized");
+    }
+
+    await sendToDiscord(
+      BOOKINGS_WEBHOOK_URL,
+      { content: "🧪 Test message to **Bookings** channel from `/test-bookings`" },
+      "BOOKINGS-TEST"
+    );
+    return res.send("Sent test message to Bookings Discord webhook (if configured).");
+  } catch (err) {
+    console.error("💥 Error in /test-bookings:", err);
+    return res.status(500).send("Server error");
+  }
 });
 
 app.get("/", (req, res) => {
