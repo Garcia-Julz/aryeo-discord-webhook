@@ -22,6 +22,9 @@ const SHOW_FULL_CLIENT_PHONE_IN_DISCORD =
 const DEBUG_CANCELED_FILTER =
   (process.env.DEBUG_CANCELED_FILTER || "").toLowerCase() === "true";
 
+const DEBUG_ADDRESS_PARSING =
+  (process.env.DEBUG_ADDRESS_PARSING || "").toLowerCase() === "true";
+
 // --- ENV VARS ---
 // --- SMRTPHONE (SMS) ---
 const SMRTPHONE_API_KEY = process.env.SMRTPHONE_API_KEY;
@@ -77,6 +80,7 @@ console.log(
   SHOW_FULL_CLIENT_PHONE_IN_DISCORD
 );
 console.log("Boot: DEBUG_CANCELED_FILTER =", DEBUG_CANCELED_FILTER);
+console.log("Boot: DEBUG_ADDRESS_PARSING =", DEBUG_ADDRESS_PARSING);
 
 // --- BODY PARSER ---
 app.use(
@@ -154,6 +158,21 @@ function getEasternYMD(isoString) {
   return `${year}-${month}-${day}`;
 }
 
+function getAppointmentSortTime_(appt) {
+  const raw =
+    appt?.start_at ||
+    appt?.scheduled_at ||
+    appt?.date ||
+    null;
+
+  if (!raw) return Number.MAX_SAFE_INTEGER;
+
+  const ms = new Date(raw).getTime();
+  if (Number.isNaN(ms)) return Number.MAX_SAFE_INTEGER;
+
+  return ms;
+}
+
 async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
   if (!webhookUrl) {
     console.error(
@@ -162,7 +181,14 @@ async function sendToDiscord(webhookUrl, payload, contextLabel = "") {
     return { ok: false, error: "Missing webhook URL" };
   }
 
-  const body = typeof payload === "string" ? { content: payload } : payload;
+  const baseBody =
+    typeof payload === "string" ? { content: payload } : payload || {};
+
+  // Disable link embeds / previews in Discord
+  const body = {
+    ...baseBody,
+    flags: ((baseBody.flags || 0) | 4),
+  };
 
   try {
     console.log(`➡️ Sending to Discord [${contextLabel}]…`);
@@ -620,15 +646,64 @@ async function fetchAppointmentsForDate(dateIso) {
 // ADDRESS HELPERS
 // ---------------------------------------------------------
 
-function extractAddressFromObject(obj) {
-  if (!obj || typeof obj !== "object") return null;
+function cleanAddressValue_(val) {
+  if (typeof val !== "string") return null;
+  const cleaned = val.replace(/\s+/g, " ").trim();
+  return cleaned || null;
+}
 
-  const primaryFields = [
+function hasStreetNumber_(value) {
+  return /\b\d+[A-Za-z]?(?:-\d+)?\b/.test(String(value || ""));
+}
+
+function looksLikeFullAddress_(value) {
+  const s = String(value || "").trim();
+  if (!s) return false;
+
+  const hasNumber = hasStreetNumber_(s);
+  const hasStreetWord =
+    /\b(st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|ln|lane|ct|court|cir|circle|trl|trail|way|ter|terrace|pl|place|pkwy|parkway)\b/i.test(
+      s
+    );
+  const hasComma = s.includes(",");
+  const hasZip = /\b\d{5}(?:-\d{4})?\b/.test(s);
+
+  return (hasNumber && hasStreetWord) || (hasComma && hasNumber) || (hasNumber && hasZip);
+}
+
+function scoreAddressCandidate_(value) {
+  const s = String(value || "").trim();
+  if (!s) return -999;
+
+  let score = 0;
+
+  if (looksLikeFullAddress_(s)) score += 100;
+  if (hasStreetNumber_(s)) score += 50;
+  if (s.includes(",")) score += 20;
+  if (/\b\d{5}(?:-\d{4})?\b/.test(s)) score += 20;
+  if (/\b[A-Z]{2}\b/.test(s)) score += 10;
+  if (s.length >= 20) score += 5;
+  if (s.length >= 30) score += 5;
+
+  if (!hasStreetNumber_(s) && /\b(st|street|ave|avenue|rd|road|dr|drive)\b/i.test(s)) {
+    score -= 25;
+  }
+
+  return score;
+}
+
+function extractAddressCandidatesFromObject_(obj) {
+  if (!obj || typeof obj !== "object") return [];
+
+  const candidates = [];
+
+  const directFields = [
     "full_address",
     "formatted_address",
-    "address",
     "property_full_address",
     "property_address",
+    "display_address",
+    "address",
     "address_line1",
     "address1",
     "line1",
@@ -638,55 +713,72 @@ function extractAddressFromObject(obj) {
     "street_line_2",
   ];
 
-  let base = null;
-  for (const key of primaryFields) {
-    if (typeof obj[key] === "string" && obj[key].trim()) {
-      base = obj[key].trim();
-      break;
-    }
+  for (const key of directFields) {
+    const value = cleanAddressValue_(obj[key]);
+    if (value) candidates.push(value);
   }
 
-  if (!base) return null;
+  const line1 =
+    cleanAddressValue_(obj.address_line1) ||
+    cleanAddressValue_(obj.address1) ||
+    cleanAddressValue_(obj.line1) ||
+    cleanAddressValue_(obj.street1) ||
+    cleanAddressValue_(obj.street) ||
+    cleanAddressValue_(obj.street_line_1);
 
-  let city = obj.city || obj.locality || obj.town || null;
+  const line2 =
+    cleanAddressValue_(obj.address_line2) ||
+    cleanAddressValue_(obj.address2) ||
+    cleanAddressValue_(obj.line2) ||
+    cleanAddressValue_(obj.street_line_2);
 
-  let state =
-    obj.state ||
-    obj.region ||
-    obj.province ||
-    obj.state_province ||
-    obj.state_code ||
-    null;
+  const city =
+    cleanAddressValue_(obj.city) ||
+    cleanAddressValue_(obj.locality) ||
+    cleanAddressValue_(obj.town) ||
+    cleanAddressValue_(obj.municipality);
 
-  let postal = obj.postal_code || obj.zip || obj.zip_code || obj.postcode || null;
+  const state =
+    cleanAddressValue_(obj.state) ||
+    cleanAddressValue_(obj.region) ||
+    cleanAddressValue_(obj.province) ||
+    cleanAddressValue_(obj.state_province) ||
+    cleanAddressValue_(obj.state_code);
 
-  if (!city || !state || !postal) {
-    for (const [key, value] of Object.entries(obj)) {
-      if (typeof value !== "string") continue;
-      const k = key.toLowerCase();
-      const v = value.trim();
-      if (!v) continue;
+  const postal =
+    cleanAddressValue_(obj.postal_code) ||
+    cleanAddressValue_(obj.zip) ||
+    cleanAddressValue_(obj.zip_code) ||
+    cleanAddressValue_(obj.postcode);
 
-      if (!city && k.includes("city")) city = v;
-      else if (
-        !state &&
-        (k.includes("state") || k.includes("province") || k.includes("region"))
-      )
-        state = v;
-      else if (
-        !postal &&
-        (k.includes("postal") || k.includes("zip") || k.includes("postcode"))
-      )
-        postal = v;
-    }
-  }
+  const composedStreet = [line1, line2].filter(Boolean).join(", ");
+  const composed = [composedStreet, city, state, postal].filter(Boolean).join(", ");
 
-  const parts = [base];
-  if (city) parts.push(city);
-  if (state) parts.push(state);
-  if (postal) parts.push(postal);
+  if (composed) candidates.push(composed);
+  if (composedStreet) candidates.push(composedStreet);
 
-  return parts.join(", ");
+  return [...new Set(candidates)];
+}
+
+function chooseBestAddressCandidate_(candidates) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+  const ranked = candidates
+    .filter(Boolean)
+    .map((value) => ({
+      value,
+      score: scoreAddressCandidate_(value),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  return ranked[0]?.value || null;
+}
+
+function extractAddressFromObject(obj) {
+  if (!obj || typeof obj !== "object") return null;
+
+  const candidates = extractAddressCandidatesFromObject_(obj);
+  return chooseBestAddressCandidate_(candidates);
 }
 
 function findAnyFullAddress(obj, depth = 0) {
@@ -708,6 +800,9 @@ function findAnyFullAddress(obj, depth = 0) {
 
 function findAnyAddressLikeString(obj, depth = 0) {
   if (!obj || typeof obj !== "object" || depth > 8) return null;
+
+  const direct = extractAddressFromObject(obj);
+  if (direct) return direct;
 
   for (const [key, val] of Object.entries(obj)) {
     if (typeof val === "string") {
@@ -731,12 +826,14 @@ function extractAddressFromAppointment(appt) {
   if (!appt) return null;
   const order = appt.order || {};
 
+  // IMPORTANT:
+  // Parent object first, nested address second, so nested fields win.
   const mergedListing = order.listing
-    ? { ...(order.listing.address || {}), ...order.listing }
+    ? { ...order.listing, ...(order.listing.address || {}) }
     : null;
 
   const mergedOrder = Object.keys(order).length
-    ? { ...(order.address || {}), ...order }
+    ? { ...order, ...(order.address || {}) }
     : null;
 
   const candidates = [
@@ -752,9 +849,25 @@ function extractAddressFromAppointment(appt) {
     appt,
   ];
 
+  const gatheredCandidates = [];
+
   for (const obj of candidates) {
-    const addr = extractAddressFromObject(obj);
-    if (addr) return addr;
+    if (!obj) continue;
+    const extracted = extractAddressCandidatesFromObject_(obj);
+    gatheredCandidates.push(...extracted);
+  }
+
+  const bestCandidate = chooseBestAddressCandidate_([...new Set(gatheredCandidates)]);
+  if (bestCandidate) {
+    if (DEBUG_ADDRESS_PARSING) {
+      console.log("📍 Address candidate selection:", {
+        appointmentId: appt.id || null,
+        orderId: order.id || null,
+        chosen: bestCandidate,
+        candidates: [...new Set(gatheredCandidates)],
+      });
+    }
+    return bestCandidate;
   }
 
   const deepAddr = findAnyFullAddress({ appointment: appt, order });
@@ -844,7 +957,12 @@ function getSmsLocationLabel(appt) {
 // ---------------------------------------------------------
 
 function buildMorningBriefingMessage(dateIso, appointments) {
-  const { date: prettyDate } = formatToEastern(`${dateIso}T00:00:00Z`);
+  const prettyDate = new Date(`${dateIso}T12:00:00Z`).toLocaleDateString("en-US", {
+    timeZone: CRON_TZ,
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+  });
 
   let lines = [];
   lines.push(`☀️🌆 Daily Schedule – ${prettyDate}`);
@@ -855,10 +973,19 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     return lines.join("\n");
   }
 
-  lines.push(`• Total Appointments Today: ${appointments.length}`);
+  const sortedAppointments = [...appointments].sort((a, b) => {
+    const timeDiff = getAppointmentSortTime_(a) - getAppointmentSortTime_(b);
+    if (timeDiff !== 0) return timeDiff;
+
+    const aId = String(a?.id || "");
+    const bId = String(b?.id || "");
+    return aId.localeCompare(bId);
+  });
+
+  lines.push(`• Total Appointments Today: ${sortedAppointments.length}`);
   lines.push("");
 
-  appointments.forEach((appt, idx) => {
+  sortedAppointments.forEach((appt, idx) => {
     const order = appt.order || {};
     const customer = order.customer || {};
     const items = order.items || [];
@@ -872,7 +999,7 @@ function buildMorningBriefingMessage(dateIso, appointments) {
       ? formatToEastern(startRaw)
       : { date: "unknown", time: "unknown" };
 
-    let propertyAddress = getSmsLocationLabel(appt) || "Unknown address";
+    const propertyAddress = getSmsLocationLabel(appt) || "Unknown address";
 
     let shooterNames = [];
     if (Array.isArray(users) && users.length > 0) {
@@ -904,27 +1031,18 @@ function buildMorningBriefingMessage(dateIso, appointments) {
     }
 
     const orderId = order.id;
-    let orderLabel = order.number
+    const orderLabel = order.number
       ? `Order #${order.number}`
       : order.title || orderId || "Order";
 
-    const orderStatusUrl =
-      order.status_url ||
-      order.invoice_url ||
-      order.payment_url ||
-      (orderId ? `${ARYEO_ADMIN_BASE_URL}/admin/orders/${orderId}/edit` : null);
-
     lines.push(`**Appointment ${idx + 1}**`);
+    lines.push(`• Time: \`${when.time}\``);
     lines.push(`• Client: \`${clientName}\``);
     if (clientPhone) lines.push(`• Phone: \`${clientPhone}\``);
-    lines.push(`• Time: \`${when.time}\``);
     lines.push(`• Service: \`${serviceSummary}\``);
     lines.push(`• Photographer: \`${shootersLabel}\``);
     lines.push(`• Address: \`${propertyAddress}\``);
-
-    if (orderStatusUrl) {
-      lines.push(`• Order: [${orderLabel}](${orderStatusUrl})`);
-    }
+    lines.push(`• Order: \`${orderLabel}\``);
     lines.push("");
   });
 
@@ -1182,13 +1300,9 @@ async function handleOrderCreated(activity) {
       customerName = order.customer.name;
     }
 
-    if (order.listing?.address?.full_address) {
-      propertyAddress = order.listing.address.full_address;
-    } else if (order.address?.full_address) {
-      propertyAddress = order.address.full_address;
-    } else {
-      const deepAddr = findAnyFullAddress(order);
-      if (deepAddr) propertyAddress = deepAddr;
+    const extractedAddress = extractAddressFromAppointment({ order });
+    if (extractedAddress) {
+      propertyAddress = extractedAddress;
     }
 
     if (propertyAddress && propertyAddress !== "unknown") {
@@ -1215,6 +1329,12 @@ async function handleOrderCreated(activity) {
         const formatted = formatToEastern(appointmentRaw);
         appointmentDate = formatted.date;
         appointmentTime = formatted.time;
+      }
+
+      const apptAddress = extractAddressFromAppointment({ ...appt, order });
+      if (apptAddress) {
+        propertyAddress = apptAddress;
+        mapsUrl = buildGoogleMapsUrl(propertyAddress);
       }
 
       if (Array.isArray(appt.users) && appt.users.length > 0) {
@@ -1550,9 +1670,10 @@ async function handleAppointmentRescheduled(activity) {
 
       if (order.customer && order.customer.name) customerName = order.customer.name;
 
-      if (order.listing?.address?.full_address)
-        propertyAddress = order.listing.address.full_address;
-      else if (order.address?.full_address) propertyAddress = order.address.full_address;
+      const extractedAddress = extractAddressFromAppointment({ order });
+      if (extractedAddress) {
+        propertyAddress = extractedAddress;
+      }
 
       if (propertyAddress && propertyAddress !== "unknown") {
         mapsUrl = buildGoogleMapsUrl(propertyAddress);
@@ -1579,6 +1700,12 @@ async function handleAppointmentRescheduled(activity) {
           appointmentDate = formatted.date;
           appointmentTime = formatted.time;
         }
+
+        const apptAddress = extractAddressFromAppointment({ ...appt, order });
+        if (apptAddress) {
+          propertyAddress = apptAddress;
+          mapsUrl = buildGoogleMapsUrl(propertyAddress);
+        }
       }
     }
   } else {
@@ -1597,6 +1724,12 @@ async function handleAppointmentRescheduled(activity) {
         state: resource?.state,
       });
       return;
+    }
+
+    const extractedAddress = extractAddressFromAppointment(resource);
+    if (extractedAddress) {
+      propertyAddress = extractedAddress;
+      mapsUrl = buildGoogleMapsUrl(propertyAddress);
     }
   }
 
@@ -1692,11 +1825,9 @@ async function handlePhotographerAssignmentChanged(activity) {
 
       if (order.customer && order.customer.name) customerName = order.customer.name;
 
-      if (order.listing?.address?.full_address)
-        propertyAddress = order.listing.address.full_address;
-      else if (order.address?.full_address) propertyAddress = order.address.full_address;
-
-      if (propertyAddress && propertyAddress !== "unknown") {
+      const extractedAddress = extractAddressFromAppointment({ order });
+      if (extractedAddress) {
+        propertyAddress = extractedAddress;
         mapsUrl = buildGoogleMapsUrl(propertyAddress);
       }
 
@@ -1743,6 +1874,12 @@ async function handlePhotographerAssignmentChanged(activity) {
           appointmentDate = formatted.date;
           appointmentTime = formatted.time;
         }
+
+        const apptAddress = extractAddressFromAppointment({ ...appt, order });
+        if (apptAddress) {
+          propertyAddress = apptAddress;
+          mapsUrl = buildGoogleMapsUrl(propertyAddress);
+        }
       }
     }
   } else {
@@ -1763,8 +1900,9 @@ async function handlePhotographerAssignmentChanged(activity) {
       return;
     }
 
-    if (resource?.address?.full_address) {
-      propertyAddress = resource.address.full_address;
+    const extractedAddress = extractAddressFromAppointment(resource);
+    if (extractedAddress) {
+      propertyAddress = extractedAddress;
       mapsUrl = buildGoogleMapsUrl(propertyAddress);
     }
   }
