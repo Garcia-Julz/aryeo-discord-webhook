@@ -81,7 +81,10 @@ console.log("Boot: DAILY_JOB_MINUTE_ET =", DAILY_JOB_MINUTE_ET);
 console.log("Boot: DAILY_CRON_EXPR =", DAILY_CRON_EXPR);
 
 console.log("Boot: ARYEO_WEBHOOK_SECRET present?", !!ARYEO_WEBHOOK_SECRET);
-console.log("Boot: ENABLE_REAL_SIGNATURE_VERIFICATION =", ENABLE_REAL_SIGNATURE_VERIFICATION);
+console.log(
+  "Boot: ENABLE_REAL_SIGNATURE_VERIFICATION =",
+  ENABLE_REAL_SIGNATURE_VERIFICATION
+);
 console.log("Boot: ARYEO_API_KEY present?", !!ARYEO_API_KEY);
 console.log("Boot: DRONE_WEBHOOK_URL present?", !!DRONE_WEBHOOK_URL);
 console.log("Boot: QUICKBOOKS_WEBHOOK_URL present?", !!QUICKBOOKS_WEBHOOK_URL);
@@ -128,12 +131,16 @@ function verifyAryeoSignature(rawBody, signatureHeader) {
   }
 
   if (!ARYEO_WEBHOOK_SECRET) {
-    console.error("❌ ENABLE_REAL_SIGNATURE_VERIFICATION is on but ARYEO_WEBHOOK_SECRET is missing.");
+    console.error(
+      "❌ ENABLE_REAL_SIGNATURE_VERIFICATION is on but ARYEO_WEBHOOK_SECRET is missing."
+    );
     return false;
   }
 
   if (!rawBody || !signatureHeader) {
-    console.error("❌ Missing rawBody or signatureHeader for webhook verification.");
+    console.error(
+      "❌ Missing rawBody or signatureHeader for webhook verification."
+    );
     return false;
   }
 
@@ -171,6 +178,81 @@ function getEasternTodayYMD(dateObj = new Date()) {
     month: "2-digit",
     day: "2-digit",
   });
+}
+
+function getEasternYMDFromDate(dateObj) {
+  return dateObj.toLocaleDateString("en-CA", {
+    timeZone: CRON_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+}
+
+function getEasternDateParts(dateObj = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: CRON_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(dateObj);
+
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+
+  return {
+    year: year ? parseInt(year, 10) : null,
+    month: month ? parseInt(month, 10) : null,
+    day: day ? parseInt(day, 10) : null,
+  };
+}
+
+function getEasternYMDOffset(daysOffset = 0) {
+  const now = new Date();
+  const easternParts = getEasternDateParts(now);
+
+  if (
+    !easternParts.year ||
+    !easternParts.month ||
+    !easternParts.day
+  ) {
+    return getEasternTodayYMD();
+  }
+
+  const baseUtcDate = new Date(
+    Date.UTC(
+      easternParts.year,
+      easternParts.month - 1,
+      easternParts.day + daysOffset,
+      12,
+      0,
+      0
+    )
+  );
+
+  return getEasternYMDFromDate(baseUtcDate);
+}
+
+function isValidYMD(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
+}
+
+function resolveDateFromQuery(query) {
+  const rawDate = query?.date ? String(query.date).trim() : "";
+  if (rawDate && isValidYMD(rawDate)) {
+    return rawDate;
+  }
+
+  const rawDays = query?.days ? String(query.days).trim() : "";
+  if (rawDays !== "") {
+    const parsed = parseInt(rawDays, 10);
+    if (!Number.isNaN(parsed)) {
+      return getEasternYMDOffset(parsed);
+    }
+  }
+
+  return getEasternTodayYMD();
 }
 
 function formatToEastern(isoString) {
@@ -290,7 +372,14 @@ function buildGoogleMapsUrl(addressString) {
 }
 
 function dedupeStrings(arr) {
-  return [...new Set((arr || []).filter(Boolean).map((v) => String(v).trim()).filter(Boolean))];
+  return [
+    ...new Set(
+      (arr || [])
+        .filter(Boolean)
+        .map((v) => String(v).trim())
+        .filter(Boolean)
+    ),
+  ];
 }
 
 // ---------------------------------------------------------
@@ -503,7 +592,9 @@ function summarizeOrderItems(items) {
   if (names.length === 1) return names[0];
 
   const firstFew = names.slice(0, 3).join(", ");
-  return names.length > 3 ? `${firstFew} (+${names.length - 3} more)` : firstFew;
+  return names.length > 3
+    ? `${firstFew} (+${names.length - 3} more)`
+    : firstFew;
 }
 
 function orderRequiresDrone(order) {
@@ -561,7 +652,11 @@ async function aryeoGet(path, contextLabel = "ARYEO") {
     const json = safeJsonParse(text);
 
     if (!resp.ok) {
-      console.error(`❌ Aryeo request failed [${contextLabel}]:`, resp.status, text);
+      console.error(
+        `❌ Aryeo request failed [${contextLabel}]:`,
+        resp.status,
+        text
+      );
       return null;
     }
 
@@ -648,24 +743,36 @@ async function fetchAppointmentsForDate(dateIso) {
 
   const enriched = await Promise.all(
     filteredByDate.map(async (appt) => {
-      if (
-        appt.order &&
-        appt.order.customer &&
-        (
-          appt.order.address ||
-          (appt.order.listing && appt.order.listing.address)
-        )
-      ) {
+      const orderId = appt.order_id || appt.order?.id || null;
+
+      const existingOrder = appt.order || {};
+      const hasExistingCustomer = !!existingOrder.customer;
+
+      const hasExistingAddress =
+        !!existingOrder.address ||
+        !!existingOrder.full_address ||
+        !!existingOrder.formatted_address ||
+        !!(existingOrder.listing && existingOrder.listing.address) ||
+        !!(existingOrder.listing && existingOrder.listing.full_address) ||
+        !!(existingOrder.listing && existingOrder.listing.formatted_address);
+
+      if (hasExistingCustomer && hasExistingAddress) {
         return appt;
       }
 
-      const orderId = appt.order_id || (appt.order && appt.order.id) || null;
-      if (!orderId) return appt;
+      if (!orderId) {
+        return appt;
+      }
 
       const fullOrder = await fetchOrder(orderId);
-      if (!fullOrder) return appt;
+      if (!fullOrder) {
+        return appt;
+      }
 
-      return { ...appt, order: fullOrder };
+      return {
+        ...appt,
+        order: fullOrder,
+      };
     })
   );
 
@@ -693,7 +800,8 @@ async function fetchAppointmentsForDate(dateIso) {
         apptCanceledAt: a.canceled_at || a.cancelled_at || null,
         orderId: a.order_id || a.order?.id || null,
         orderStatus: a.order?.status,
-        orderCanceledAt: a.order?.canceled_at || a.order?.cancelled_at || null,
+        orderCanceledAt:
+          a.order?.canceled_at || a.order?.cancelled_at || null,
         start_at: a.start_at || a.scheduled_at || a.date || null,
       }))
     );
@@ -728,7 +836,11 @@ function looksLikeFullAddress_(value) {
   const hasComma = s.includes(",");
   const hasZip = /\b\d{5}(?:-\d{4})?\b/.test(s);
 
-  return (hasNumber && hasStreetWord) || (hasComma && hasNumber) || (hasNumber && hasZip);
+  return (
+    (hasNumber && hasStreetWord) ||
+    (hasComma && hasNumber) ||
+    (hasNumber && hasZip)
+  );
 }
 
 function scoreAddressCandidate_(value) {
@@ -755,6 +867,58 @@ function scoreAddressCandidate_(value) {
   return score;
 }
 
+function splitCommaAddressParts_(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+
+  return raw
+    .split(",")
+    .map((part) => cleanAddressValue_(part))
+    .filter(Boolean);
+}
+
+function isLikelyStreetPart_(value) {
+  const s = String(value || "").trim();
+  if (!s) return false;
+
+  return (
+    hasStreetNumber_(s) ||
+    /\b(st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|ln|lane|ct|court|cir|circle|trl|trail|way|ter|terrace|pl|place|pkwy|parkway)\b/i.test(
+      s
+    )
+  );
+}
+
+function buildExpandedCommaAddressCandidates_(value) {
+  const s = cleanAddressValue_(value);
+  if (!s) return [];
+
+  const parts = splitCommaAddressParts_(s);
+  if (parts.length < 2) return [];
+
+  const candidates = [];
+
+  if (parts.length >= 4) {
+    candidates.push(parts.join(", "));
+  }
+
+  if (parts.length >= 3) {
+    const first = parts[0];
+    const second = parts[1];
+    const third = parts[2];
+    const fourth = parts[3] || null;
+
+    if (!isLikelyStreetPart_(first) && isLikelyStreetPart_(second)) {
+      const rebuilt = [second, first, third, fourth]
+        .filter(Boolean)
+        .join(", ");
+      candidates.push(rebuilt);
+    }
+  }
+
+  return dedupeStrings(candidates);
+}
+
 function extractAddressCandidatesFromObject_(obj) {
   if (!obj || typeof obj !== "object") return [];
 
@@ -778,7 +942,12 @@ function extractAddressCandidatesFromObject_(obj) {
 
   for (const key of directFields) {
     const value = cleanAddressValue_(obj[key]);
-    if (value) candidates.push(value);
+    if (value) {
+      candidates.push(value);
+
+      const expandedCandidates = buildExpandedCommaAddressCandidates_(value);
+      candidates.push(...expandedCandidates);
+    }
   }
 
   const line1 =
@@ -815,10 +984,40 @@ function extractAddressCandidatesFromObject_(obj) {
     cleanAddressValue_(obj.postcode);
 
   const composedStreet = [line1, line2].filter(Boolean).join(", ");
-  const composed = [composedStreet, city, state, postal].filter(Boolean).join(", ");
+  const composed = [composedStreet, city, state, postal]
+    .filter(Boolean)
+    .join(", ");
 
   if (composed) candidates.push(composed);
   if (composedStreet) candidates.push(composedStreet);
+
+  if (
+    obj.street_number ||
+    obj.street_name ||
+    obj.route ||
+    obj.city ||
+    obj.state ||
+    obj.postal_code ||
+    obj.zip
+  ) {
+    const streetNumber = cleanAddressValue_(obj.street_number);
+    const streetName =
+      cleanAddressValue_(obj.street_name) ||
+      cleanAddressValue_(obj.route);
+    const rebuiltStreet = [streetNumber, streetName].filter(Boolean).join(" ");
+
+    const rebuiltAddress = [
+      rebuiltStreet || null,
+      city,
+      state,
+      postal,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    if (rebuiltAddress) candidates.push(rebuiltAddress);
+    if (rebuiltStreet) candidates.push(rebuiltStreet);
+  }
 
   return dedupeStrings(candidates);
 }
@@ -850,6 +1049,18 @@ function findAnyFullAddress(obj, depth = 0) {
     return obj.full_address.trim();
   }
 
+  if (typeof obj.formatted_address === "string" && obj.formatted_address.trim()) {
+    return obj.formatted_address.trim();
+  }
+
+  if (typeof obj.property_full_address === "string" && obj.property_full_address.trim()) {
+    return obj.property_full_address.trim();
+  }
+
+  if (typeof obj.display_address === "string" && obj.display_address.trim()) {
+    return obj.display_address.trim();
+  }
+
   for (const val of Object.values(obj)) {
     if (val && typeof val === "object") {
       const found = findAnyFullAddress(val, depth + 1);
@@ -870,7 +1081,10 @@ function findAnyAddressLikeString(obj, depth = 0) {
     if (typeof val === "string") {
       const k = key.toLowerCase();
       if (
-        (k.includes("address") || k.includes("street") || k.includes("line1")) &&
+        (k.includes("address") ||
+          k.includes("street") ||
+          k.includes("line1") ||
+          k.includes("route")) &&
         val.trim().length > 5
       ) {
         return val.trim();
@@ -917,14 +1131,16 @@ function extractAddressFromAppointment(appt) {
     gatheredCandidates.push(...extracted);
   }
 
-  const bestCandidate = chooseBestAddressCandidate_(dedupeStrings(gatheredCandidates));
+  const dedupedCandidates = dedupeStrings(gatheredCandidates);
+  const bestCandidate = chooseBestAddressCandidate_(dedupedCandidates);
+
   if (bestCandidate) {
     if (DEBUG_ADDRESS_PARSING) {
       console.log("📍 Address candidate selection:", {
         appointmentId: appt.id || null,
         orderId: order.id || null,
         chosen: bestCandidate,
-        candidates: dedupeStrings(gatheredCandidates),
+        candidates: dedupedCandidates,
       });
     }
     return bestCandidate;
@@ -946,13 +1162,19 @@ function extractAddressFromAppointment(appt) {
 function extractCityFromObject(obj) {
   if (!obj || typeof obj !== "object") return null;
 
-  const direct = obj.city || obj.locality || obj.town || obj.municipality || null;
+  const direct =
+    obj.city || obj.locality || obj.town || obj.municipality || null;
+
   if (typeof direct === "string" && direct.trim()) return direct.trim();
 
   for (const [k, v] of Object.entries(obj)) {
     if (typeof v !== "string") continue;
     const key = k.toLowerCase();
-    if (key.includes("city") || key.includes("locality") || key.includes("town")) {
+    if (
+      key.includes("city") ||
+      key.includes("locality") ||
+      key.includes("town")
+    ) {
       const val = v.trim();
       if (val) return val;
     }
@@ -1004,12 +1226,14 @@ function getSmsLocationLabel(appt) {
   const city = extractCityFromAppointment(appt);
 
   if (!addr && !city) return "the property address";
+
   if (addr && city) {
     const addrLower = String(addr).toLowerCase();
     const cityLower = String(city).toLowerCase();
     if (addrLower.includes(cityLower)) return addr;
     return `${addr}, ${city}`;
   }
+
   return addr || city;
 }
 
@@ -1018,12 +1242,15 @@ function getSmsLocationLabel(appt) {
 // ---------------------------------------------------------
 
 function buildMorningBriefingMessage(dateIso, appointments) {
-  const prettyDate = new Date(`${dateIso}T12:00:00Z`).toLocaleDateString("en-US", {
-    timeZone: CRON_TZ,
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-  });
+  const prettyDate = new Date(`${dateIso}T12:00:00Z`).toLocaleDateString(
+    "en-US",
+    {
+      timeZone: CRON_TZ,
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+    }
+  );
 
   let lines = [];
   lines.push(`☀️🌆 Daily Schedule – ${prettyDate}`);
@@ -1096,16 +1323,21 @@ function buildMorningBriefingMessage(dateIso, appointments) {
 }
 
 async function sendMorningBriefing(dateOverrideIso) {
-  const todayEst = dateOverrideIso || getEasternTodayYMD();
-  console.log("📅 Sending morning briefing for date:", todayEst);
+  const targetDate = dateOverrideIso || getEasternTodayYMD();
+  console.log("📅 Sending morning briefing for date:", targetDate);
 
-  const appointments = await fetchAppointmentsForDate(todayEst);
+  const appointments = await fetchAppointmentsForDate(targetDate);
   if (!appointments) {
     console.log("⚠️ No appointments data returned, skipping Discord send.");
-    return { ok: false, date: todayEst, count: 0, reason: "No appointments data" };
+    return {
+      ok: false,
+      date: targetDate,
+      count: 0,
+      reason: "No appointments data",
+    };
   }
 
-  const content = buildMorningBriefingMessage(todayEst, appointments);
+  const content = buildMorningBriefingMessage(targetDate, appointments);
   console.log("➡️ Morning briefing Discord payload length:", content.length);
 
   const resp = await sendToDiscord(
@@ -1114,7 +1346,12 @@ async function sendMorningBriefing(dateOverrideIso) {
     "BOOKINGS-MORNING_BRIEFING"
   );
 
-  return { ok: !!resp.ok, date: todayEst, count: appointments.length, discord: resp };
+  return {
+    ok: !!resp.ok,
+    date: targetDate,
+    count: appointments.length,
+    discord: resp,
+  };
 }
 
 // ---------------------------------------------------------
@@ -1126,7 +1363,9 @@ async function sendClientRemindersForDate(
   { limit = 0, idxOnly = null, forceDryRun = false } = {}
 ) {
   if (!SMRTPHONE_FROM_NUMBER) {
-    console.error("❌ Missing SMRTPHONE_FROM_NUMBER env var (SMS will not send).");
+    console.error(
+      "❌ Missing SMRTPHONE_FROM_NUMBER env var (SMS will not send)."
+    );
     return {
       targetDate,
       appointmentsFound: 0,
@@ -1156,7 +1395,9 @@ async function sendClientRemindersForDate(
       : appointments;
 
   const trimmed =
-    limit > 0 ? listToSend.slice(0, Math.min(limit, listToSend.length)) : listToSend;
+    limit > 0
+      ? listToSend.slice(0, Math.min(limit, listToSend.length))
+      : listToSend;
 
   console.log(
     `📲 sendClientRemindersForDate: date=${targetDate} found=${appointments.length} willSend=${trimmed.length} dryRun=${SMRTPHONE_DRY_RUN || forceDryRun}`
@@ -1253,6 +1494,7 @@ async function sendClientRemindersForDate(
 
 async function runDailyBriefingAndSms() {
   const targetDate = getEasternTodayYMD();
+
   console.log("⏰ Daily job fired:", {
     cron: DAILY_CRON_EXPR,
     timezone: CRON_TZ,
@@ -1283,9 +1525,12 @@ async function runDailyBriefingAndSms() {
       discordResult && typeof discordResult.count === "number"
         ? discordResult.count
         : null,
-    smsSent: smsResult && typeof smsResult.sent === "number" ? smsResult.sent : null,
+    smsSent:
+      smsResult && typeof smsResult.sent === "number" ? smsResult.sent : null,
     smsSkipped:
-      smsResult && typeof smsResult.skipped === "number" ? smsResult.skipped : null,
+      smsResult && typeof smsResult.skipped === "number"
+        ? smsResult.skipped
+        : null,
     smsFailed:
       smsResult && typeof smsResult.failed === "number" ? smsResult.failed : null,
     smsAppointmentsFound:
@@ -2056,14 +2301,14 @@ app.get("/test-morning-briefing", async (req, res) => {
       return res.status(401).send("Unauthorized");
     }
 
-    const targetDate = (req.query.date && String(req.query.date)) || getEasternTodayYMD();
+    const targetDate = getEasternTodayYMD();
     const appointments = (await fetchAppointmentsForDate(targetDate)) || [];
     const content = buildMorningBriefingMessage(targetDate, appointments);
 
     await sendToDiscord(
       BOOKINGS_WEBHOOK_URL,
       { content },
-      "DAILY-MORNING-BRIEFING-TEST"
+      "DAILY-MORNING-BRIEFING-TEST-TODAY"
     );
 
     return res.send(
@@ -2075,6 +2320,32 @@ app.get("/test-morning-briefing", async (req, res) => {
   }
 });
 
+app.get("/test-morning-briefing-by-date", async (req, res) => {
+  try {
+    const token = req.query.token || "";
+    if (SMRTPHONE_TEST_TOKEN && token !== SMRTPHONE_TEST_TOKEN) {
+      return res.status(401).send("Unauthorized");
+    }
+
+    const targetDate = resolveDateFromQuery(req.query);
+    const appointments = (await fetchAppointmentsForDate(targetDate)) || [];
+    const content = buildMorningBriefingMessage(targetDate, appointments);
+
+    await sendToDiscord(
+      BOOKINGS_WEBHOOK_URL,
+      { content },
+      "DAILY-MORNING-BRIEFING-TEST-BY-DATE"
+    );
+
+    return res.send(
+      `Sent test morning briefing for ${targetDate}. Count = ${appointments.length}`
+    );
+  } catch (err) {
+    console.error("💥 Error in /test-morning-briefing-by-date:", err);
+    return res.status(500).send("Server error.");
+  }
+});
+
 app.get("/test-address-debug", async (req, res) => {
   try {
     const token = req.query.token || "";
@@ -2082,11 +2353,12 @@ app.get("/test-address-debug", async (req, res) => {
       return res.status(401).send("Unauthorized");
     }
 
-    const targetDate = (req.query.date && String(req.query.date)) || getEasternTodayYMD();
+    const targetDate = resolveDateFromQuery(req.query);
     const appointments = (await fetchAppointmentsForDate(targetDate)) || [];
 
     const debug = appointments.map((appt, idx) => {
       const order = appt.order || {};
+
       return {
         idx,
         appointmentId: appt.id || null,
@@ -2096,7 +2368,9 @@ app.get("/test-address-debug", async (req, res) => {
         parsedCity: extractCityFromAppointment(appt),
         smsLocationLabel: getSmsLocationLabel(appt),
         listingAddress: order.listing?.address || null,
+        listingObject: order.listing || null,
         orderAddress: order.address || null,
+        orderObject: order || null,
       };
     });
 
@@ -2156,8 +2430,7 @@ app.get("/ping-todays-clients", async (req, res) => {
       return res.status(401).send("Unauthorized");
     }
 
-    let targetDate = (req.query.date && String(req.query.date)) || null;
-    if (!targetDate) targetDate = getEasternTodayYMD();
+    let targetDate = resolveDateFromQuery(req.query);
 
     const forceDryRun = String(req.query.dryRun || "").toLowerCase() === "true";
     const limit = Math.max(0, parseInt(req.query.limit || "0", 10) || 0);
