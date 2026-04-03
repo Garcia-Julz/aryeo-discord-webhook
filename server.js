@@ -120,6 +120,7 @@ app.use(
 function timingSafeEqualStrings(a, b) {
   const aBuf = Buffer.from(String(a || ""), "utf8");
   const bBuf = Buffer.from(String(b || ""), "utf8");
+
   if (aBuf.length !== bBuf.length) return false;
   return crypto.timingSafeEqual(aBuf, bBuf);
 }
@@ -170,7 +171,6 @@ function verifyAryeoSignature(rawBody, signatureHeader) {
 // ---------------------------------------------------------
 // SHARED HELPERS
 // ---------------------------------------------------------
-
 function getEasternTodayYMD(dateObj = new Date()) {
   return dateObj.toLocaleDateString("en-CA", {
     timeZone: CRON_TZ,
@@ -212,11 +212,7 @@ function getEasternYMDOffset(daysOffset = 0) {
   const now = new Date();
   const easternParts = getEasternDateParts(now);
 
-  if (
-    !easternParts.year ||
-    !easternParts.month ||
-    !easternParts.day
-  ) {
+  if (!easternParts.year || !easternParts.month || !easternParts.day) {
     return getEasternTodayYMD();
   }
 
@@ -385,7 +381,6 @@ function dedupeStrings(arr) {
 // ---------------------------------------------------------
 // CANCEL / STATUS FILTER
 // ---------------------------------------------------------
-
 function looksCanceledStatus_(val) {
   const s = String(val || "").toLowerCase().trim();
   if (!s) return false;
@@ -435,7 +430,6 @@ function isCanceledAppointmentOrOrder_(appt) {
 // ---------------------------------------------------------
 // SMRTPHONE helper
 // ---------------------------------------------------------
-
 async function sendSmrtPhoneSms({ from, to, message }) {
   if (!SMRTPHONE_API_KEY) {
     console.error("❌ Missing SMRTPHONE_API_KEY");
@@ -494,7 +488,6 @@ async function sendSmrtPhoneSms({ from, to, message }) {
 // ---------------------------------------------------------
 // PHONE HELPERS
 // ---------------------------------------------------------
-
 function normalizePhoneString(raw) {
   if (!raw || typeof raw !== "string") return null;
   const cleaned = raw.trim();
@@ -580,7 +573,6 @@ function getClientPhoneDigits(customer) {
 // ---------------------------------------------------------
 // ORDER / APPT HELPERS
 // ---------------------------------------------------------
-
 function summarizeOrderItems(items) {
   if (!Array.isArray(items) || items.length === 0) return "Unknown service";
 
@@ -641,6 +633,7 @@ async function aryeoGet(path, contextLabel = "ARYEO") {
 
   try {
     console.log(`🔍 Fetching from Aryeo [${contextLabel}]:`, url);
+
     const resp = await fetch(url, {
       headers: {
         Accept: "application/json",
@@ -722,9 +715,12 @@ async function fetchOrderPaymentInfo(orderId) {
 async function fetchAppointmentsForDate(dateIso) {
   if (!dateIso) return null;
 
+  // IMPORTANT:
+  // Keep this include string minimal because the larger nested include version
+  // was the likely source of the 0-count regression.
   const json = await aryeoGet(
     `/appointments?filter[date]=${dateIso}&include=order,order.customer,order.items,order.listing,users`,
-  "FETCH_APPOINTMENTS_FOR_DATE"
+    "FETCH_APPOINTMENTS_FOR_DATE"
   );
 
   if (!json) return null;
@@ -743,9 +739,9 @@ async function fetchAppointmentsForDate(dateIso) {
 
   const enriched = await Promise.all(
     filteredByDate.map(async (appt) => {
-      const orderId = appt.order_id || appt.order?.id || null;
-
       const existingOrder = appt.order || {};
+      const orderId = appt.order_id || existingOrder.id || null;
+
       const hasExistingCustomer = !!existingOrder.customer;
 
       const hasExistingAddress =
@@ -813,7 +809,6 @@ async function fetchAppointmentsForDate(dateIso) {
 // ---------------------------------------------------------
 // ADDRESS HELPERS
 // ---------------------------------------------------------
-
 function cleanAddressValue_(val) {
   if (typeof val !== "string") return null;
   const cleaned = val.replace(/\s+/g, " ").trim();
@@ -1006,12 +1001,7 @@ function extractAddressCandidatesFromObject_(obj) {
       cleanAddressValue_(obj.route);
     const rebuiltStreet = [streetNumber, streetName].filter(Boolean).join(" ");
 
-    const rebuiltAddress = [
-      rebuiltStreet || null,
-      city,
-      state,
-      postal,
-    ]
+    const rebuiltAddress = [rebuiltStreet || null, city, state, postal]
       .filter(Boolean)
       .join(", ");
 
@@ -1053,7 +1043,10 @@ function findAnyFullAddress(obj, depth = 0) {
     return obj.formatted_address.trim();
   }
 
-  if (typeof obj.property_full_address === "string" && obj.property_full_address.trim()) {
+  if (
+    typeof obj.property_full_address === "string" &&
+    obj.property_full_address.trim()
+  ) {
     return obj.property_full_address.trim();
   }
 
@@ -1158,7 +1151,6 @@ function extractAddressFromAppointment(appt) {
 // ---------------------------------------------------------
 // CITY HELPERS
 // ---------------------------------------------------------
-
 function extractCityFromObject(obj) {
   if (!obj || typeof obj !== "object") return null;
 
@@ -1230,6 +1222,7 @@ function getSmsLocationLabel(appt) {
   if (addr && city) {
     const addrLower = String(addr).toLowerCase();
     const cityLower = String(city).toLowerCase();
+
     if (addrLower.includes(cityLower)) return addr;
     return `${addr}, ${city}`;
   }
@@ -1240,7 +1233,6 @@ function getSmsLocationLabel(appt) {
 // ---------------------------------------------------------
 // DISCORD: Morning briefing
 // ---------------------------------------------------------
-
 function buildMorningBriefingMessage(dateIso, appointments) {
   const prettyDate = new Date(`${dateIso}T12:00:00Z`).toLocaleDateString(
     "en-US",
@@ -1357,7 +1349,6 @@ async function sendMorningBriefing(dateOverrideIso) {
 // ---------------------------------------------------------
 // SMS: Send reminders to clients for a given Eastern date
 // ---------------------------------------------------------
-
 async function sendClientRemindersForDate(
   targetDate,
   { limit = 0, idxOnly = null, forceDryRun = false } = {}
@@ -1491,7 +1482,6 @@ async function sendClientRemindersForDate(
 // ---------------------------------------------------------
 // DAILY JOB WRAPPER
 // ---------------------------------------------------------
-
 async function runDailyBriefingAndSms() {
   const targetDate = getEasternTodayYMD();
 
@@ -1546,7 +1536,6 @@ async function runDailyBriefingAndSms() {
 // ---------------------------------------------------------
 // EVENT HANDLERS
 // ---------------------------------------------------------
-
 async function handleOrderCreated(activity) {
   const { resource } = activity || {};
   const orderId = resource?.id;
@@ -1604,16 +1593,20 @@ async function handleOrderCreated(activity) {
       const appt = order.appointments[0];
 
       if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
-        console.log("🚫 ORDER_CREATED ignored because appointment/order canceled:", {
-          orderId,
-          apptId: appt.id,
-          apptStatus: appt.status,
-          orderStatus: order.status,
-        });
+        console.log(
+          "🚫 ORDER_CREATED ignored because appointment/order canceled:",
+          {
+            orderId,
+            apptId: appt.id,
+            apptStatus: appt.status,
+            orderStatus: order.status,
+          }
+        );
         return;
       }
 
-      const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+      const appointmentRaw =
+        appt.start_at || appt.scheduled_at || appt.date || null;
 
       if (appointmentRaw && typeof appointmentRaw === "string") {
         const formatted = formatToEastern(appointmentRaw);
@@ -1630,7 +1623,9 @@ async function handleOrderCreated(activity) {
       if (Array.isArray(appt.users) && appt.users.length > 0) {
         appt.users.forEach((u) => {
           const userName =
-            u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
+            u.name ||
+            [u.first_name, u.last_name].filter(Boolean).join(" ") ||
+            null;
 
           if (userName) {
             photographerNames.push(userName);
@@ -1651,7 +1646,8 @@ async function handleOrderCreated(activity) {
     return;
   }
 
-  const orderLabel = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
+  const orderLabel =
+    (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
 
   let lines = [];
   lines.push("🚁 **New Drone Order – Airspace Check Needed**");
@@ -1666,7 +1662,9 @@ async function handleOrderCreated(activity) {
 
   if (photographerNames.length > 0) {
     const label =
-      photographerNames.length === 1 ? photographerNames[0] : photographerNames.join(", ");
+      photographerNames.length === 1
+        ? photographerNames[0]
+        : photographerNames.join(", ");
     lines.push(`• Photographer: \`${label}\``);
   }
 
@@ -1790,11 +1788,21 @@ async function handleOrderPaymentReceived(activity) {
   if (amountLabel === "unknown" && resource) {
     if (resource.total_price_formatted) {
       amountLabel = resource.total_price_formatted;
-    } else if (typeof resource.total_price === "number" && resource.total_price !== 0) {
-      amountLabel = formatCurrencyFromUnknownValue(resource.total_price) || amountLabel;
-    } else if (typeof resource.amount === "number" && resource.amount !== 0) {
+    } else if (
+      typeof resource.total_price === "number" &&
+      resource.total_price !== 0
+    ) {
+      amountLabel =
+        formatCurrencyFromUnknownValue(resource.total_price) || amountLabel;
+    } else if (
+      typeof resource.amount === "number" &&
+      resource.amount !== 0
+    ) {
       amountLabel = formatCurrencyFromUnknownValue(resource.amount) || amountLabel;
-    } else if (typeof resource.amount === "string" && resource.amount.trim() !== "") {
+    } else if (
+      typeof resource.amount === "string" &&
+      resource.amount.trim() !== ""
+    ) {
       amountLabel = resource.amount;
     }
   }
@@ -1886,19 +1894,25 @@ async function handleOrderCanceled(activity) {
 
   const label = (orderNumber && `Order #${orderNumber}`) || orderTitle || orderId;
   const when = formatToEastern(occurred_at);
-  const reason = activity.reason || (activity.metadata && activity.metadata.reason) || null;
+  const reason =
+    activity.reason || (activity.metadata && activity.metadata.reason) || null;
 
   let lines = [];
   lines.push("❌ **Order Cancelled**");
   lines.push("");
   lines.push(`• Order: \`${label}\``);
   if (customerName !== "unknown") lines.push(`• Client: \`${customerName}\``);
-  if (serviceSummary !== "unknown") lines.push(`• Service: \`${serviceSummary}\``);
+  if (serviceSummary !== "unknown")
+    lines.push(`• Service: \`${serviceSummary}\``);
   lines.push(`• Cancelled at: \`${when.date} – ${when.time}\``);
   if (reason) lines.push(`• Reason: \`${reason}\``);
 
   const content = lines.join("\n");
-  await sendToDiscord(BOOKINGS_WEBHOOK_URL, { content }, "BOOKINGS-ORDER_CANCELED");
+  await sendToDiscord(
+    BOOKINGS_WEBHOOK_URL,
+    { content },
+    "BOOKINGS-ORDER_CANCELED"
+  );
 }
 
 async function handleAppointmentRescheduled(activity) {
@@ -1945,16 +1959,20 @@ async function handleAppointmentRescheduled(activity) {
         const appt = order.appointments[0];
 
         if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
-          console.log("🚫 APPT_RESCHEDULED ignored because appointment/order canceled:", {
-            orderId,
-            apptId: appt.id,
-            apptStatus: appt.status,
-            orderStatus: order.status,
-          });
+          console.log(
+            "🚫 APPT_RESCHEDULED ignored because appointment/order canceled:",
+            {
+              orderId,
+              apptId: appt.id,
+              apptStatus: appt.status,
+              orderStatus: order.status,
+            }
+          );
           return;
         }
 
-        const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+        const appointmentRaw =
+          appt.start_at || appt.scheduled_at || appt.date || null;
 
         if (appointmentRaw && typeof appointmentRaw === "string") {
           const formatted = formatToEastern(appointmentRaw);
@@ -1970,19 +1988,27 @@ async function handleAppointmentRescheduled(activity) {
       }
     }
   } else {
-    const appointmentRaw = resource?.start_at || resource?.scheduled_at || resource?.date || null;
+    const appointmentRaw =
+      resource?.start_at || resource?.scheduled_at || resource?.date || null;
+
     if (appointmentRaw && typeof appointmentRaw === "string") {
       const formatted = formatToEastern(appointmentRaw);
       appointmentDate = formatted.date;
       appointmentTime = formatted.time;
     }
 
-    if (looksCanceledStatus_(resource?.status) || looksCanceledStatus_(resource?.state)) {
-      console.log("🚫 APPT_RESCHEDULED ignored because appointment resource looks canceled:", {
-        apptId: resource?.id,
-        status: resource?.status,
-        state: resource?.state,
-      });
+    if (
+      looksCanceledStatus_(resource?.status) ||
+      looksCanceledStatus_(resource?.state)
+    ) {
+      console.log(
+        "🚫 APPT_RESCHEDULED ignored because appointment resource looks canceled:",
+        {
+          apptId: resource?.id,
+          status: resource?.status,
+          state: resource?.state,
+        }
+      );
       return;
     }
 
@@ -2004,7 +2030,8 @@ async function handleAppointmentRescheduled(activity) {
   lines.push("**New Appointment Time**");
   lines.push(`• Date: \`${appointmentDate}\``);
   lines.push(`• Time: \`${appointmentTime}\``);
-  if (propertyAddress !== "unknown") lines.push(`• Location: \`${propertyAddress}\``);
+  if (propertyAddress !== "unknown")
+    lines.push(`• Location: \`${propertyAddress}\``);
   if (mapsUrl) lines.push(`• Map: ${mapsUrl}`);
   lines.push("");
   lines.push(`• Updated at: \`${changeWhen.date} – ${changeWhen.time}\``);
@@ -2028,7 +2055,8 @@ async function handlePhotographerAssignmentChanged(activity) {
 
   if (resource?.user) {
     const u = resource.user;
-    const userName = u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
+    const userName =
+      u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
     if (userName) {
       shooterNames.push(userName);
       const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
@@ -2036,7 +2064,8 @@ async function handlePhotographerAssignmentChanged(activity) {
     }
   } else if (Array.isArray(resource?.users)) {
     resource.users.forEach((u) => {
-      const userName = u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
+      const userName =
+        u.name || [u.first_name, u.last_name].filter(Boolean).join(" ") || null;
       if (userName) {
         shooterNames.push(userName);
         const mention = PHOTOGRAPHER_DISCORD_MAP[userName];
@@ -2049,7 +2078,9 @@ async function handlePhotographerAssignmentChanged(activity) {
   shooterMentions = dedupeStrings(shooterMentions);
 
   const direction =
-    name && name.toUpperCase().includes("UNASSIGN") ? "unassigned from" : "assigned to";
+    name && name.toUpperCase().includes("UNASSIGN")
+      ? "unassigned from"
+      : "assigned to";
 
   let orderLabel = orderId || "unknown";
   let orderNumber = null;
@@ -2108,16 +2139,20 @@ async function handlePhotographerAssignmentChanged(activity) {
 
       if (appt) {
         if (isCanceledAppointmentOrOrder_({ ...appt, order })) {
-          console.log("🚫 PHOTOG_ASSIGN ignored because appointment/order canceled:", {
-            orderId,
-            apptId: appt.id,
-            apptStatus: appt.status,
-            orderStatus: order.status,
-          });
+          console.log(
+            "🚫 PHOTOG_ASSIGN ignored because appointment/order canceled:",
+            {
+              orderId,
+              apptId: appt.id,
+              apptStatus: appt.status,
+              orderStatus: order.status,
+            }
+          );
           return;
         }
 
-        const appointmentRaw = appt.start_at || appt.scheduled_at || appt.date || null;
+        const appointmentRaw =
+          appt.start_at || appt.scheduled_at || appt.date || null;
         if (appointmentRaw && typeof appointmentRaw === "string") {
           const formatted = formatToEastern(appointmentRaw);
           appointmentDate = formatted.date;
@@ -2132,19 +2167,26 @@ async function handlePhotographerAssignmentChanged(activity) {
       }
     }
   } else {
-    const appointmentRaw = resource?.start_at || resource?.scheduled_at || resource?.date || null;
+    const appointmentRaw =
+      resource?.start_at || resource?.scheduled_at || resource?.date || null;
     if (appointmentRaw && typeof appointmentRaw === "string") {
       const formatted = formatToEastern(appointmentRaw);
       appointmentDate = formatted.date;
       appointmentTime = formatted.time;
     }
 
-    if (looksCanceledStatus_(resource?.status) || looksCanceledStatus_(resource?.state)) {
-      console.log("🚫 PHOTOG_ASSIGN ignored because appointment resource looks canceled:", {
-        apptId: resource?.id,
-        status: resource?.status,
-        state: resource?.state,
-      });
+    if (
+      looksCanceledStatus_(resource?.status) ||
+      looksCanceledStatus_(resource?.state)
+    ) {
+      console.log(
+        "🚫 PHOTOG_ASSIGN ignored because appointment resource looks canceled:",
+        {
+          apptId: resource?.id,
+          status: resource?.status,
+          state: resource?.state,
+        }
+      );
       return;
     }
 
@@ -2168,7 +2210,8 @@ async function handlePhotographerAssignmentChanged(activity) {
   }
 
   if (customerName !== "unknown") lines.push(`• Client: \`${customerName}\``);
-  if (serviceSummary !== "unknown") lines.push(`• Service: \`${serviceSummary}\``);
+  if (serviceSummary !== "unknown")
+    lines.push(`• Service: \`${serviceSummary}\``);
 
   if (
     appointmentDate !== "unknown" ||
@@ -2177,16 +2220,22 @@ async function handlePhotographerAssignmentChanged(activity) {
   ) {
     lines.push("");
     lines.push("**Appointment**");
-    if (appointmentDate !== "unknown") lines.push(`• Date: \`${appointmentDate}\``);
-    if (appointmentTime !== "unknown") lines.push(`• Time: \`${appointmentTime}\``);
-    if (propertyAddress !== "unknown") lines.push(`• Location: \`${propertyAddress}\``);
+    if (appointmentDate !== "unknown")
+      lines.push(`• Date: \`${appointmentDate}\``);
+    if (appointmentTime !== "unknown")
+      lines.push(`• Time: \`${appointmentTime}\``);
+    if (propertyAddress !== "unknown")
+      lines.push(`• Location: \`${propertyAddress}\``);
     if (mapsUrl) lines.push(`• Map: ${mapsUrl}`);
   }
 
   if (shooterNames.length > 0) {
-    const shootersLabel = shooterNames.length === 1 ? shooterNames[0] : shooterNames.join(", ");
+    const shootersLabel =
+      shooterNames.length === 1 ? shooterNames[0] : shooterNames.join(", ");
     lines.push("");
-    lines.push(`• Photographer(s) ${direction} appointment: \`${shootersLabel}\``);
+    lines.push(
+      `• Photographer(s) ${direction} appointment: \`${shootersLabel}\``
+    );
   } else {
     lines.push("");
     lines.push("• Photographer(s) changed (names not parsed).");
@@ -2210,7 +2259,6 @@ async function handlePhotographerAssignmentChanged(activity) {
 // ---------------------------------------------------------
 // ACTIVITY NAME → HANDLER MAP
 // ---------------------------------------------------------
-
 const activityHandlers = {
   ORDER_CREATED: handleOrderCreated,
   ORDER_PAYMENT_RECEIVED: handleOrderPaymentReceived,
@@ -2228,7 +2276,6 @@ const activityHandlers = {
 // ---------------------------------------------------------
 // MAIN WEBHOOK ROUTE
 // ---------------------------------------------------------
-
 app.post("/aryeo-webhook", async (req, res) => {
   try {
     console.log("✅ WEBHOOK HIT", new Date().toISOString());
@@ -2264,7 +2311,6 @@ app.post("/aryeo-webhook", async (req, res) => {
 // ---------------------------------------------------------
 // CRON JOBS
 // ---------------------------------------------------------
-
 cron.schedule(
   DAILY_CRON_EXPR,
   async () => {
@@ -2276,7 +2322,6 @@ cron.schedule(
 // ---------------------------------------------------------
 // SIMPLE TEST ROUTES
 // ---------------------------------------------------------
-
 app.get("/test-daily-job-now", async (req, res) => {
   const token = req.query.token || "";
   if (!SMRTPHONE_TEST_TOKEN || token !== SMRTPHONE_TEST_TOKEN) {
@@ -2285,15 +2330,19 @@ app.get("/test-daily-job-now", async (req, res) => {
 
   try {
     const result = await runDailyBriefingAndSms();
-    return res.status(200).send(
-      `✅ Ran daily job now (Discord + SMS)\n` + JSON.stringify(result, null, 2)
-    );
+    return res
+      .status(200)
+      .send(
+        `✅ Ran daily job now (Discord + SMS)\n` +
+          JSON.stringify(result, null, 2)
+      );
   } catch (err) {
     console.error("💥 Error in /test-daily-job-now:", err);
     return res.status(500).send("Server error");
   }
 });
 
+// Today's Discord schedule
 app.get("/test-morning-briefing", async (req, res) => {
   try {
     const token = req.query.token || "";
@@ -2320,6 +2369,7 @@ app.get("/test-morning-briefing", async (req, res) => {
   }
 });
 
+// Specific date Discord schedule
 app.get("/test-morning-briefing-by-date", async (req, res) => {
   try {
     const token = req.query.token || "";
@@ -2430,7 +2480,7 @@ app.get("/ping-todays-clients", async (req, res) => {
       return res.status(401).send("Unauthorized");
     }
 
-    let targetDate = resolveDateFromQuery(req.query);
+    const targetDate = resolveDateFromQuery(req.query);
 
     const forceDryRun = String(req.query.dryRun || "").toLowerCase() === "true";
     const limit = Math.max(0, parseInt(req.query.limit || "0", 10) || 0);
@@ -2468,7 +2518,10 @@ app.get("/test-drone", async (req, res) => {
       { content: "🧪 Test message to **Drone** channel from `/test-drone`" },
       "DRONE-TEST"
     );
-    return res.send("Sent test message to Drone Discord webhook (if configured).");
+
+    return res.send(
+      "Sent test message to Drone Discord webhook (if configured)."
+    );
   } catch (err) {
     console.error("💥 Error in /test-drone:", err);
     return res.status(500).send("Server error");
@@ -2485,11 +2538,15 @@ app.get("/test-quickbooks", async (req, res) => {
     await sendToDiscord(
       QUICKBOOKS_WEBHOOK_URL,
       {
-        content: "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`",
+        content:
+          "🧪 Test message to **QuickBooks** channel from `/test-quickbooks`",
       },
       "QB-TEST"
     );
-    return res.send("Sent test message to QuickBooks Discord webhook (if configured).");
+
+    return res.send(
+      "Sent test message to QuickBooks Discord webhook (if configured)."
+    );
   } catch (err) {
     console.error("💥 Error in /test-quickbooks:", err);
     return res.status(500).send("Server error");
@@ -2508,7 +2565,10 @@ app.get("/test-bookings", async (req, res) => {
       { content: "🧪 Test message to **Bookings** channel from `/test-bookings`" },
       "BOOKINGS-TEST"
     );
-    return res.send("Sent test message to Bookings Discord webhook (if configured).");
+
+    return res.send(
+      "Sent test message to Bookings Discord webhook (if configured)."
+    );
   } catch (err) {
     console.error("💥 Error in /test-bookings:", err);
     return res.status(500).send("Server error");
