@@ -723,8 +723,8 @@ async function fetchAppointmentsForDate(dateIso) {
   if (!dateIso) return null;
 
   const json = await aryeoGet(
-    `/appointments?filter[date]=${dateIso}&include=order,order.address,order.customer,order.items,order.listing,order.listing.address,users`,
-    "FETCH_APPOINTMENTS_FOR_DATE"
+    `/appointments?filter[date]=${dateIso}&include=order,order.customer,order.items,order.listing,users`,
+  "FETCH_APPOINTMENTS_FOR_DATE"
   );
 
   if (!json) return null;
