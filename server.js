@@ -1404,7 +1404,9 @@ async function sendClientRemindersForDate(
     const order = appt.order || {};
     const customer = order.customer || {};
 
-    const clientName = customer.name || "there";
+    const fullName = customer.name || "";
+    const firstName = fullName.trim().split(/\s+/)[0] || "there";
+    const clientName = fullName.trim() || "there";
     const to = getClientPhoneDigits(customer);
 
     if (!to) {
@@ -1426,7 +1428,7 @@ async function sendClientRemindersForDate(
     const address = getSmsLocationLabel(appt);
 
     const message =
-      `Good morning ${clientName}!\n` +
+      `Good morning ${firstName}!\n` +
       `Friendly reminder: we’re scheduled for ${when.time} today.\n` +
       `Location: ${address}\n`;
 
